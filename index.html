@@ -1,0 +1,1074 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Speech-to-Text Converter</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .drop-zone {
+            border: 3px dashed #007bff;
+            border-radius: 10px;
+            padding: 50px;
+            text-align: center;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+        }
+        
+        .drop-zone:hover, .drop-zone.dragover {
+            border-color: #0056b3;
+            background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
+            transform: translateY(-2px);
+        }
+        
+        .drop-zone.disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            border-color: #6c757d;
+        }
+        
+        .progress-container {
+            margin: 20px 0;
+        }
+        
+        .transcript-box {
+            min-height: 200px;
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 20px;
+            background-color: #f8f9fa;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+        }
+        
+        .stats-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 10px 0;
+        }
+        
+        .btn-custom {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            color: white;
+            padding: 12px 30px;
+            border-radius: 25px;
+            transition: all 0.3s ease;
+        }
+        
+        .btn-custom:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+            color: white;
+        }
+        
+        .btn-subscription {
+            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+            border: none;
+            color: white;
+            padding: 15px 40px;
+            border-radius: 30px;
+            font-size: 1.1rem;
+            transition: all 0.3s ease;
+        }
+        
+        .btn-subscription:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(40, 167, 69, 0.3);
+            color: white;
+        }
+        
+        .file-info {
+            background: #e8f5e8;
+            border: 1px solid #28a745;
+            border-radius: 5px;
+            padding: 10px;
+            margin: 10px 0;
+        }
+        
+        .error-message {
+            background: #f8d7da;
+            border: 1px solid #dc3545;
+            color: #721c24;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 10px 0;
+        }
+        
+        .loading-spinner {
+            display: none;
+            text-align: center;
+            margin: 20px 0;
+        }
+        
+        .hero-section {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 60px 0;
+            margin-bottom: 40px;
+        }
+        
+        .feature-icon {
+            font-size: 3rem;
+            color: #667eea;
+            margin-bottom: 20px;
+        }
+        
+        .subscription-banner {
+            background: linear-gradient(135deg, #ffc107 0%, #ff8c00 100%);
+            color: #212529;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+            text-align: center;
+            box-shadow: 0 4px 15px rgba(255, 193, 7, 0.3);
+        }
+        
+        .subscription-status {
+            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+            color: white;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+            text-align: center;
+        }
+        
+        .pricing-card {
+            background: white;
+            border: 2px solid #dee2e6;
+            border-radius: 15px;
+            padding: 30px;
+            text-align: center;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            transition: all 0.3s ease;
+        }
+        
+        .pricing-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.15);
+        }
+        
+        .pricing-card.featured {
+            border-color: #28a745;
+            transform: scale(1.05);
+        }
+        
+        .price {
+            font-size: 3rem;
+            font-weight: bold;
+            color: #28a745;
+        }
+        
+        .user-info {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            padding: 15px;
+            margin: 10px 0;
+        }
+
+        .modal-custom .modal-content {
+            border-radius: 15px;
+            border: none;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+
+        .modal-custom .modal-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 15px 15px 0 0;
+            border-bottom: none;
+        }
+
+        .feature-list {
+            list-style: none;
+            padding: 0;
+        }
+
+        .feature-list li {
+            padding: 8px 0;
+            border-bottom: 1px solid #eee;
+        }
+
+        .feature-list li:last-child {
+            border-bottom: none;
+        }
+
+        .feature-list .fas {
+            color: #28a745;
+            margin-right: 10px;
+        }
+    </style>
+</head>
+<body>
+    <!-- Hero Section -->
+    <div class="hero-section">
+        <div class="container">
+            <div class="row justify-content-center text-center">
+                <div class="col-lg-8">
+                    <h1 class="display-4 mb-4">
+                        <i class="fas fa-microphone-alt me-3"></i>
+                        Speech-to-Text Converter
+                    </h1>
+                    <p class="lead">Convert your audio files to text with Microsoft Azure's advanced AI technology. Support for WAV, MP3, AAC, M4A and more.</p>
+                    
+                    <!-- Authentication Section -->
+                    <div id="authSection" class="mt-4">
+                        <div id="loginSection" style="display: none;">
+                            <p class="mb-3">Please sign in with your Google account to use the service.</p>
+                            <button class="btn btn-light btn-lg" id="loginBtn">
+                                <i class="fab fa-google me-2"></i>
+                                Sign in with Google
+                            </button>
+                        </div>
+                        
+                        <div id="userSection" style="display: none;">
+                            <div class="user-info">
+                                <div class="d-flex align-items-center justify-content-center">
+                                    <img id="userAvatar" src="" alt="User Avatar" class="rounded-circle me-3" width="50" height="50" style="display: none;">
+                                    <div>
+                                        <p class="mb-1">Welcome, <strong id="userName"></strong>!</p>
+                                        <div class="btn-group">
+                                            <button class="btn btn-outline-light btn-sm" id="manageSubscriptionBtn" style="display: none;">
+                                                <i class="fas fa-cog me-2"></i>
+                                                Manage Subscription
+                                            </button>
+                                            <button class="btn btn-outline-light btn-sm" id="logoutBtn">
+                                                <i class="fas fa-sign-out-alt me-2"></i>
+                                                Logout
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Subscription Status -->
+                    <div id="subscriptionStatus" style="display: none;"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <!-- Subscription Required Banner -->
+        <div id="subscriptionBanner" class="subscription-banner" style="display: none;">
+            <h4><i class="fas fa-crown me-2"></i>Premium Subscription Required</h4>
+            <p class="mb-3">Unlock unlimited audio transcriptions with our premium subscription!</p>
+            <button class="btn btn-subscription" id="subscribeBtn">
+                <i class="fas fa-star me-2"></i>
+                Subscribe for £5/month
+            </button>
+        </div>
+
+        <!-- Features Section -->
+        <div class="row text-center mb-5">
+            <div class="col-md-4">
+                <i class="fas fa-cloud feature-icon"></i>
+                <h4>Cloud-Powered</h4>
+                <p>Uses Microsoft Azure's Speech-to-Text API for accurate transcriptions</p>
+            </div>
+            <div class="col-md-4">
+                <i class="fas fa-file-audio feature-icon"></i>
+                <h4>Multiple Formats</h4>
+                <p>Supports WAV, MP3, AAC, M4A, FLAC, and OGG files</p>
+            </div>
+            <div class="col-md-4">
+                <i class="fas fa-download feature-icon"></i>
+                <h4>Export Options</h4>
+                <p>Copy text or download as Word document</p>
+            </div>
+        </div>
+
+        <!-- Upload Section -->
+        <div class="row justify-content-center" id="uploadSection" style="display: none;">
+            <div class="col-lg-10">
+                <div class="card shadow-lg">
+                    <div class="card-header bg-primary text-white">
+                        <h3 class="mb-0">
+                            <i class="fas fa-upload me-2"></i>
+                            Upload Audio File
+                        </h3>
+                    </div>
+                    <div class="card-body">
+                        <!-- Drop Zone -->
+                        <div class="drop-zone" id="dropZone">
+                            <i class="fas fa-cloud-upload-alt fa-3x mb-3 text-primary"></i>
+                            <h4>Drag & Drop Your Audio File Here</h4>
+                            <p class="text-muted">or click to browse files</p>
+                            <p class="small text-muted">Supported formats: WAV, MP3, AAC, M4A, FLAC, OGG (Max: 100MB)</p>
+                        </div>
+                        
+                        <input type="file" id="fileInput" accept=".wav,.mp3,.aac,.m4a,.flac,.ogg" style="display: none;">
+                        
+                        <!-- File Info -->
+                        <div id="fileInfo" style="display: none;"></div>
+                        
+                        <!-- Progress Bar -->
+                        <div class="progress-container" style="display: none;" id="progressContainer">
+                            <div class="progress">
+                                <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                                     role="progressbar" style="width: 0%" id="progressBar">
+                                    <span id="progressText">Processing...</span>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Loading Spinner -->
+                        <div class="loading-spinner" id="loadingSpinner">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                            <p class="mt-2">Transcribing your audio... This may take a few moments.</p>
+                        </div>
+                        
+                        <!-- Error Messages -->
+                        <div id="errorMessage" style="display: none;"></div>
+                        
+                        <!-- Upload Button -->
+                        <div class="text-center mt-3">
+                            <button class="btn btn-custom" id="uploadBtn" style="display: none;">
+                                <i class="fas fa-magic me-2"></i>
+                                Convert to Text
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Results Section -->
+                <div class="card shadow-lg mt-4" id="resultsSection" style="display: none;">
+                    <div class="card-header bg-success text-white">
+                        <h3 class="mb-0">
+                            <i class="fas fa-file-alt me-2"></i>
+                            Transcription Results
+                        </h3>
+                    </div>
+                    <div class="card-body">
+                        <!-- Stats -->
+                        <div class="row">
+                            <div class="col-md-4">
+                                <div class="stats-card text-center">
+                                    <h5>Word Count</h5>
+                                    <h2 id="wordCount">-</h2>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="stats-card text-center">
+                                    <h5>Confidence</h5>
+                                    <h2 id="confidence">-</h2>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="stats-card text-center">
+                                    <h5>Status</h5>
+                                    <h2><i class="fas fa-check-circle"></i></h2>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Transcript -->
+                        <div class="mt-4">
+                            <h4>Transcript:</h4>
+                            <div class="transcript-box" id="transcript"></div>
+                        </div>
+                        
+                        <!-- Action Buttons -->
+                        <div class="text-center mt-4">
+                            <button class="btn btn-outline-primary me-2" id="copyBtn">
+                                <i class="fas fa-copy me-2"></i>
+                                Copy Text
+                            </button>
+                            <button class="btn btn-custom" id="downloadBtn">
+                                <i class="fas fa-download me-2"></i>
+                                Download as Word Doc
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Subscription Modal -->
+    <div class="modal fade modal-custom" id="subscriptionModal" tabindex="-1" aria-labelledby="subscriptionModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="subscriptionModalLabel">
+                        <i class="fas fa-crown me-2"></i>
+                        Premium Subscription
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row justify-content-center">
+                        <div class="col-md-8">
+                            <div class="pricing-card featured">
+                                <div class="mb-4">
+                                    <i class="fas fa-star text-warning fa-3x"></i>
+                                    <h3 class="mt-3">Premium Plan</h3>
+                                </div>
+                                
+                                <div class="price mb-4">
+                                    £5<span class="fs-6 text-muted">/month</span>
+                                </div>
+                                
+                                <ul class="feature-list mb-4">
+                                    <li><i class="fas fa-check"></i> Unlimited audio transcriptions</li>
+                                    <li><i class="fas fa-check"></i> Support for all audio formats</li>
+                                    <li><i class="fas fa-check"></i> High-quality Azure AI transcription</li>
+                                    <li><i class="fas fa-check"></i> Word document downloads</li>
+                                    <li><i class="fas fa-check"></i> Files up to 100MB</li>
+                                    <li><i class="fas fa-check"></i> Priority support</li>
+                                    <li><i class="fas fa-check"></i> Cancel anytime</li>
+                                </ul>
+                                
+                                <button class="btn btn-subscription w-100" id="modalSubscribeBtn">
+                                    <i class="fas fa-credit-card me-2"></i>
+                                    Start Subscription
+                                </button>
+                                
+                                <p class="small text-muted mt-3">
+                                    Secure payment powered by Stripe. Cancel anytime from your account settings.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="bg-dark text-white text-center py-4 mt-5">
+        <div class="container">
+            <p>&copy; 2025 Speech-to-Text Converter. Powered by Microsoft Azure Speech Services.</p>
+            <p class="small">Secure payments by <i class="fab fa-stripe"></i> Stripe</p>
+        </div>
+    </footer>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/js/bootstrap.bundle.min.js"></script>
+    <script>
+        const API_BASE = '';  // Use relative URLs since frontend is served by Flask
+        
+        let selectedFile = null;
+        let currentTranscript = '';
+        let currentFilename = '';
+        let isAuthenticated = false;
+        let currentUser = null;
+        let subscriptionActive = false;
+        let subscriptionStatus = 'inactive';
+
+        // DOM Elements
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const fileInfo = document.getElementById('fileInfo');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressBar = document.getElementById('progressBar');
+        const progressText = document.getElementById('progressText');
+        const loadingSpinner = document.getElementById('loadingSpinner');
+        const errorMessage = document.getElementById('errorMessage');
+        const resultsSection = document.getElementById('resultsSection');
+        const transcript = document.getElementById('transcript');
+        const wordCount = document.getElementById('wordCount');
+        const confidence = document.getElementById('confidence');
+        const copyBtn = document.getElementById('copyBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        
+        // Auth elements
+        const authSection = document.getElementById('authSection');
+        const loginSection = document.getElementById('loginSection');
+        const userSection = document.getElementById('userSection');
+        const loginBtn = document.getElementById('loginBtn');
+        const logoutBtn = document.getElementById('logoutBtn');
+        const userName = document.getElementById('userName');
+        const userAvatar = document.getElementById('userAvatar');
+        const uploadSection = document.getElementById('uploadSection');
+        
+        // Subscription elements
+        const subscriptionBanner = document.getElementById('subscriptionBanner');
+        const subscriptionStatusDiv = document.getElementById('subscriptionStatus');
+        const subscribeBtn = document.getElementById('subscribeBtn');
+        const modalSubscribeBtn = document.getElementById('modalSubscribeBtn');
+        const manageSubscriptionBtn = document.getElementById('manageSubscriptionBtn');
+        const subscriptionModal = new bootstrap.Modal(document.getElementById('subscriptionModal'));
+
+        // Event Listeners
+        dropZone.addEventListener('click', handleDropZoneClick);
+        dropZone.addEventListener('dragover', handleDragOver);
+        dropZone.addEventListener('drop', handleDrop);
+        dropZone.addEventListener('dragenter', e => e.preventDefault());
+        dropZone.addEventListener('dragleave', handleDragLeave);
+        
+        fileInput.addEventListener('change', handleFileSelect);
+        uploadBtn.addEventListener('click', uploadFile);
+        copyBtn.addEventListener('click', copyTranscript);
+        downloadBtn.addEventListener('click', downloadDocument);
+        
+        // Auth event listeners
+        loginBtn.addEventListener('click', initiateLogin);
+        logoutBtn.addEventListener('click', logout);
+        
+        // Subscription event listeners
+        subscribeBtn.addEventListener('click', () => subscriptionModal.show());
+        modalSubscribeBtn.addEventListener('click', startSubscription);
+        manageSubscriptionBtn.addEventListener('click', openCustomerPortal);
+
+        // Authentication functions
+        async function checkAuthStatus() {
+            try {
+                const response = await fetch(`${API_BASE}/auth/user`, {
+                    credentials: 'include'
+                });
+                const data = await response.json();
+                
+                if (data.authenticated) {
+                    isAuthenticated = true;
+                    currentUser = data.user;
+                    subscriptionActive = data.subscription_active || false;
+                    subscriptionStatus = data.subscription_status || 'inactive';
+                    showUserSection();
+                    await checkSubscriptionStatus();
+                } else {
+                    isAuthenticated = false;
+                    currentUser = null;
+                    subscriptionActive = false;
+                    showLoginSection();
+                }
+            } catch (error) {
+                console.error('Auth check failed:', error);
+                showLoginSection();
+            }
+        }
+
+        async function checkSubscriptionStatus() {
+            if (!isAuthenticated) return;
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/subscription/status`, {
+                    credentials: 'include'
+                });
+                const data = await response.json();
+                
+                subscriptionActive = data.subscription_active;
+                subscriptionStatus = data.subscription_status;
+                
+                updateSubscriptionUI();
+            } catch (error) {
+                console.error('Subscription check failed:', error);
+            }
+        }
+
+        function updateSubscriptionUI() {
+            if (!isAuthenticated) {
+                subscriptionBanner.style.display = 'none';
+                subscriptionStatusDiv.style.display = 'none';
+                uploadSection.style.display = 'none';
+                return;
+            }
+            
+            if (subscriptionActive) {
+                // Active subscription
+                subscriptionBanner.style.display = 'none';
+                subscriptionStatusDiv.innerHTML = `
+                    <div class="subscription-status">
+                        <i class="fas fa-check-circle me-2"></i>
+                        Premium Subscription Active
+                        <p class="mb-0 small">Unlimited transcriptions available</p>
+                    </div>
+                `;
+                subscriptionStatusDiv.style.display = 'block';
+                uploadSection.style.display = 'block';
+                manageSubscriptionBtn.style.display = 'inline-block';
+                
+                // Enable upload functionality
+                dropZone.classList.remove('disabled');
+                dropZone.style.pointerEvents = 'auto';
+                
+            } else {
+                // No active subscription
+                uploadSection.style.display = 'block';
+                subscriptionStatusDiv.style.display = 'none';
+                manageSubscriptionBtn.style.display = subscriptionStatus !== 'inactive' ? 'inline-block' : 'none';
+                
+                // Show subscription banner
+                let bannerMessage = '';
+                if (subscriptionStatus === 'canceled') {
+                    bannerMessage = 'Your subscription has been canceled. Reactivate to continue using the service.';
+                } else if (subscriptionStatus === 'past_due') {
+                    bannerMessage = 'Your payment is past due. Please update your payment method.';
+                } else {
+                    bannerMessage = 'Unlock unlimited audio transcriptions with our premium subscription!';
+                }
+                
+                subscriptionBanner.innerHTML = `
+                    <h4><i class="fas fa-crown me-2"></i>Premium Subscription Required</h4>
+                    <p class="mb-3">${bannerMessage}</p>
+                    <button class="btn btn-subscription" id="subscribeBtn">
+                        <i class="fas fa-star me-2"></i>
+                        Subscribe for £5/month
+                    </button>
+                `;
+                subscriptionBanner.style.display = 'block';
+                
+                // Re-attach event listener to new button
+                document.getElementById('subscribeBtn').addEventListener('click', () => subscriptionModal.show());
+                
+                // Disable upload functionality
+                dropZone.classList.add('disabled');
+                dropZone.style.pointerEvents = 'none';
+            }
+        }
+
+        function showLoginSection() {
+            loginSection.style.display = 'block';
+            userSection.style.display = 'none';
+            uploadSection.style.display = 'none';
+            subscriptionBanner.style.display = 'none';
+            subscriptionStatusDiv.style.display = 'none';
+        }
+
+        function showUserSection() {
+            loginSection.style.display = 'none';
+            userSection.style.display = 'block';
+            
+            userName.textContent = currentUser.name;
+            if (currentUser.picture) {
+                userAvatar.src = currentUser.picture;
+                userAvatar.style.display = 'block';
+            }
+        }
+
+        async function initiateLogin() {
+            try {
+                const response = await fetch(`${API_BASE}/auth/login`, {
+                    credentials: 'include'
+                });
+                const data = await response.json();
+                
+                if (data.auth_url) {
+                    window.location.href = data.auth_url;
+                } else {
+                    showError('Login failed: No authorization URL received');
+                }
+            } catch (error) {
+                showError(`Login failed: ${error.message}`);
+            }
+        }
+
+        async function logout() {
+            try {
+                await fetch(`${API_BASE}/auth/logout`, {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+                
+                isAuthenticated = false;
+                currentUser = null;
+                subscriptionActive = false;
+                subscriptionStatus = 'inactive';
+                showLoginSection();
+                
+                // Clear any results
+                resultsSection.style.display = 'none';
+                hideError();
+                
+            } catch (error) {
+                showError(`Logout failed: ${error.message}`);
+            }
+        }
+
+        // Subscription functions
+        async function startSubscription() {
+            if (!isAuthenticated) {
+                showError('Please log in first');
+                return;
+            }
+            
+            try {
+                modalSubscribeBtn.disabled = true;
+                modalSubscribeBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Creating session...';
+                
+                const response = await fetch(`${API_BASE}/api/subscription/create-checkout-session`, {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok && data.checkout_url) {
+                    // Redirect to Stripe Checkout
+                    window.location.href = data.checkout_url;
+                } else {
+                    throw new Error(data.error || 'Failed to create checkout session');
+                }
+                
+            } catch (error) {
+                showError(`Subscription failed: ${error.message}`);
+                modalSubscribeBtn.disabled = false;
+                modalSubscribeBtn.innerHTML = '<i class="fas fa-credit-card me-2"></i>Start Subscription';
+            }
+        }
+
+        async function openCustomerPortal() {
+            try {
+                manageSubscriptionBtn.disabled = true;
+                manageSubscriptionBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Loading...';
+                
+                const response = await fetch(`${API_BASE}/api/subscription/portal`, {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok && data.portal_url) {
+                    // Redirect to Stripe Customer Portal
+                    window.location.href = data.portal_url;
+                } else {
+                    throw new Error(data.error || 'Failed to open customer portal');
+                }
+                
+            } catch (error) {
+                showError(`Failed to open portal: ${error.message}`);
+            } finally {
+                manageSubscriptionBtn.disabled = false;
+                manageSubscriptionBtn.innerHTML = '<i class="fas fa-cog me-2"></i>Manage Subscription';
+            }
+        }
+
+        // File handling functions
+        function handleDropZoneClick() {
+            if (!subscriptionActive) {
+                subscriptionModal.show();
+                return;
+            }
+            fileInput.click();
+        }
+
+        function handleDragOver(e) {
+            e.preventDefault();
+            if (subscriptionActive) {
+                dropZone.classList.add('dragover');
+            }
+        }
+
+        function handleDragLeave(e) {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+        }
+
+        function handleDrop(e) {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            
+            if (!subscriptionActive) {
+                subscriptionModal.show();
+                return;
+            }
+            
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        }
+
+        function handleFileSelect(e) {
+            const files = e.target.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        }
+
+        function handleFile(file) {
+            if (!subscriptionActive) {
+                subscriptionModal.show();
+                return;
+            }
+            
+            const allowedTypes = ['audio/wav', 'audio/mpeg', 'audio/mp3', 'audio/aac', 'audio/mp4', 'audio/x-m4a', 'audio/flac', 'audio/ogg'];
+            const maxSize = 100 * 1024 * 1024; // 100MB
+
+            if (!allowedTypes.some(type => file.type.startsWith('audio/')) && !file.name.match(/\.(wav|mp3|aac|m4a|flac|ogg)$/i)) {
+                showError('Please select a valid audio file (WAV, MP3, AAC, M4A, FLAC, OGG)');
+                return;
+            }
+
+            if (file.size > maxSize) {
+                showError('File size must be less than 100MB');
+                return;
+            }
+
+            selectedFile = file;
+            currentFilename = file.name;
+            
+            // Show file info
+            fileInfo.innerHTML = `
+                <div class="file-info">
+                    <i class="fas fa-file-audio me-2"></i>
+                    <strong>${file.name}</strong><br>
+                    <small>Size: ${(file.size / (1024 * 1024)).toFixed(2)} MB</small>
+                </div>
+            `;
+            fileInfo.style.display = 'block';
+            uploadBtn.style.display = 'block';
+            hideError();
+        }
+
+        async function uploadFile() {
+            if (!selectedFile) return;
+            
+            if (!isAuthenticated) {
+                showError('Please log in to upload files');
+                return;
+            }
+            
+            if (!subscriptionActive) {
+                subscriptionModal.show();
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+
+            uploadBtn.disabled = true;
+            showProgress();
+            
+            try {
+                const response = await fetch(`${API_BASE}/upload`, {
+                    method: 'POST',
+                    body: formData,
+                    credentials: 'include'
+                });
+
+                const result = await response.json();
+
+                if (!response.ok) {
+                    if (response.status === 401) {
+                        showError('Session expired. Please log in again.');
+                        showLoginSection();
+                        return;
+                    } else if (response.status === 402) {
+                        // Payment required - subscription inactive
+                        await checkSubscriptionStatus();
+                        showError('Active subscription required. Please subscribe or check your subscription status.');
+                        return;
+                    }
+                    throw new Error(result.error || 'Upload failed');
+                }
+
+                currentTranscript = result.transcript;
+                showResults(result);
+                
+            } catch (error) {
+                showError(`Error: ${error.message}`);
+            } finally {
+                hideProgress();
+                uploadBtn.disabled = false;
+            }
+        }
+
+        function showProgress() {
+            progressContainer.style.display = 'block';
+            loadingSpinner.style.display = 'block';
+            resultsSection.style.display = 'none';
+            
+            // Simulate progress
+            let progress = 0;
+            const interval = setInterval(() => {
+                progress += Math.random() * 15;
+                if (progress > 90) progress = 90;
+                progressBar.style.width = `${progress}%`;
+            }, 500);
+            
+            // Store interval ID to clear it later
+            window.progressInterval = interval;
+        }
+
+        function hideProgress() {
+            if (window.progressInterval) {
+                clearInterval(window.progressInterval);
+            }
+            progressContainer.style.display = 'none';
+            loadingSpinner.style.display = 'none';
+            progressBar.style.width = '0%';
+        }
+
+        function showResults(result) {
+            transcript.textContent = result.transcript;
+            wordCount.textContent = result.word_count;
+            confidence.textContent = `${Math.round(result.confidence * 100)}%`;
+            
+            resultsSection.style.display = 'block';
+            resultsSection.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function showError(message) {
+            errorMessage.innerHTML = `
+                <div class="error-message">
+                    <i class="fas fa-exclamation-triangle me-2"></i>
+                    ${message}
+                </div>
+            `;
+            errorMessage.style.display = 'block';
+        }
+
+        function hideError() {
+            errorMessage.style.display = 'none';
+        }
+
+        async function copyTranscript() {
+            try {
+                await navigator.clipboard.writeText(currentTranscript);
+                copyBtn.innerHTML = '<i class="fas fa-check me-2"></i>Copied!';
+                copyBtn.classList.remove('btn-outline-primary');
+                copyBtn.classList.add('btn-success');
+                
+                setTimeout(() => {
+                    copyBtn.innerHTML = '<i class="fas fa-copy me-2"></i>Copy Text';
+                    copyBtn.classList.remove('btn-success');
+                    copyBtn.classList.add('btn-outline-primary');
+                }, 2000);
+            } catch (error) {
+                showError('Failed to copy text to clipboard');
+            }
+        }
+
+        async function downloadDocument() {
+            if (!isAuthenticated) {
+                showError('Please log in to download files');
+                return;
+            }
+            
+            if (!subscriptionActive) {
+                subscriptionModal.show();
+                return;
+            }
+            
+            try {
+                downloadBtn.disabled = true;
+                downloadBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Generating...';
+                
+                const response = await fetch(`${API_BASE}/download`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        transcript: currentTranscript,
+                        filename: currentFilename
+                    })
+                });
+
+                if (!response.ok) {
+                    if (response.status === 401) {
+                        showError('Session expired. Please log in again.');
+                        showLoginSection();
+                        return;
+                    } else if (response.status === 402) {
+                        // Payment required - subscription inactive
+                        await checkSubscriptionStatus();
+                        showError('Active subscription required. Please subscribe or check your subscription status.');
+                        return;
+                    }
+                    const error = await response.json();
+                    throw new Error(error.error || 'Download failed');
+                }
+
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${currentFilename.split('.')[0]}_transcript.docx`;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+                
+            } catch (error) {
+                showError(`Download failed: ${error.message}`);
+            } finally {
+                downloadBtn.disabled = false;
+                downloadBtn.innerHTML = '<i class="fas fa-download me-2"></i>Download as Word Doc';
+            }
+        }
+
+        function showSuccess(message) {
+            errorMessage.innerHTML = `
+                <div class="alert alert-success" role="alert">
+                    <i class="fas fa-check-circle me-2"></i>
+                    ${message}
+                </div>
+            `;
+            errorMessage.style.display = 'block';
+        }
+
+        // Check backend health and auth status on page load
+        window.addEventListener('load', async () => {
+            // Handle URL parameters first (for auth callback and subscription)
+            const urlParams = new URLSearchParams(window.location.search);
+            
+            if (urlParams.get('auth') === 'success') {
+                // Remove the parameter from URL
+                window.history.replaceState({}, document.title, window.location.pathname);
+                showSuccess('Successfully logged in!');
+                setTimeout(() => hideError(), 3000);
+            } else if (urlParams.get('auth') === 'error') {
+                showError('Authentication failed. Please try again.');
+                window.history.replaceState({}, document.title, window.location.pathname);
+            }
+            
+            // Handle subscription callback
+            if (urlParams.get('subscription') === 'success') {
+                window.history.replaceState({}, document.title, window.location.pathname);
+                showSuccess('Subscription activated successfully! You can now use all premium features.');
+                setTimeout(() => hideError(), 5000);
+            } else if (urlParams.get('subscription') === 'cancelled') {
+                window.history.replaceState({}, document.title, window.location.pathname);
+                showError('Subscription was cancelled. You can try again anytime.');
+                setTimeout(() => hideError(), 5000);
+            }
+            
+            // Check authentication status
+            await checkAuthStatus();
+            
+            // Check backend health
+            try {
+                const response = await fetch(`${API_BASE}/health`, {
+                    credentials: 'include'
+                });
+                const health = await response.json();
+                
+                if (!health.azure_speech_initialized) {
+                    showError('Azure Speech-to-Text API is not configured. Please check the server configuration.');
+                }
+                
+                if (!health.google_oauth_configured) {
+                    showError('Google OAuth is not configured. Please check the server configuration.');
+                }
+                
+                if (!health.stripe_configured) {
+                    console.warn('Stripe is not configured - subscription features may not work');
+                }
+            } catch (error) {
+                showError('Cannot connect to the backend server. Please ensure it is running.');
+            }
+        });
+
+        // Periodically check subscription status while user is active
+        setInterval(async () => {
+            if (isAuthenticated) {
+                await checkSubscriptionStatus();
+            }
+        }, 5 * 60 * 1000); // Check every 5 minutes
+    </script>
+</body>
+</html>
