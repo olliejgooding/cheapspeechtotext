@@ -20,6 +20,15 @@ import stripe
 import sqlite3
 from contextlib import contextmanager
 
+# Try to import PostgreSQL support, fall back to SQLite if not available
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    POSTGRES_AVAILABLE = True
+except ImportError:
+    POSTGRES_AVAILABLE = False
+    print("psycopg2 not available, using SQLite for database operations")
+
 # Disable OAuth2 HTTPS requirement for local development
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
@@ -51,78 +60,164 @@ STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')
 SUBSCRIPTION_PRICE_ID = os.environ.get('STRIPE_PRICE_ID')  # Your £5/month price ID
 
 # Database setup
-DATABASE = 'app.db'
+DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///app.db')
 
 def init_db():
     """Initialize the database with required tables."""
-    with sqlite3.connect(DATABASE) as conn:
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                google_id TEXT UNIQUE NOT NULL,
-                email TEXT NOT NULL,
-                name TEXT NOT NULL,
-                picture TEXT,
-                stripe_customer_id TEXT,
-                subscription_status TEXT DEFAULT 'inactive',
-                subscription_id TEXT,
-                subscription_end_date DATETIME,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS transcriptions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                filename TEXT NOT NULL,
-                transcript TEXT NOT NULL,
-                word_count INTEGER,
-                confidence REAL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users (id)
-            )
-        ''')
+    if DATABASE_URL.startswith('postgresql://') and POSTGRES_AVAILABLE:
+        # PostgreSQL initialization
+        try:
+            conn = psycopg2.connect(DATABASE_URL)
+            with conn.cursor() as cur:
+                cur.execute('''
+                    CREATE TABLE IF NOT EXISTS users (
+                        id SERIAL PRIMARY KEY,
+                        google_id TEXT UNIQUE NOT NULL,
+                        email TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        picture TEXT,
+                        stripe_customer_id TEXT,
+                        subscription_status TEXT DEFAULT 'inactive',
+                        subscription_id TEXT,
+                        subscription_end_date TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                
+                cur.execute('''
+                    CREATE TABLE IF NOT EXISTS transcriptions (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        filename TEXT NOT NULL,
+                        transcript TEXT NOT NULL,
+                        word_count INTEGER,
+                        confidence REAL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (user_id) REFERENCES users (id)
+                    )
+                ''')
+            conn.commit()
+            conn.close()
+            print("PostgreSQL database initialized successfully")
+        except Exception as e:
+            print(f"PostgreSQL initialization failed: {e}")
+    else:
+        # SQLite fallback
+        database_file = DATABASE_URL.replace('sqlite:///', '') if DATABASE_URL.startswith('sqlite://') else 'app.db'
+        with sqlite3.connect(database_file) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    google_id TEXT UNIQUE NOT NULL,
+                    email TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    picture TEXT,
+                    stripe_customer_id TEXT,
+                    subscription_status TEXT DEFAULT 'inactive',
+                    subscription_id TEXT,
+                    subscription_end_date DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS transcriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    filename TEXT NOT NULL,
+                    transcript TEXT NOT NULL,
+                    word_count INTEGER,
+                    confidence REAL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users (id)
+                )
+            ''')
+        print("SQLite database initialized successfully")
 
 @contextmanager
 def get_db_connection():
     """Context manager for database connections."""
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-    finally:
-        conn.close()
+    if DATABASE_URL.startswith('postgresql://') and POSTGRES_AVAILABLE:
+        # PostgreSQL connection
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        try:
+            yield conn
+        finally:
+            conn.close()
+    else:
+        # SQLite fallback
+        database_file = DATABASE_URL.replace('sqlite:///', '') if DATABASE_URL.startswith('sqlite://') else 'app.db'
+        conn = sqlite3.connect(database_file)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+def execute_query(conn, query, params=None, fetch=False):
+    """Execute query with proper syntax for PostgreSQL or SQLite."""
+    if DATABASE_URL.startswith('postgresql://') and POSTGRES_AVAILABLE:
+        # PostgreSQL uses %s placeholders
+        pg_query = query.replace('?', '%s')
+        with conn.cursor() as cur:
+            cur.execute(pg_query, params or ())
+            if fetch == 'one':
+                return cur.fetchone()
+            elif fetch == 'all':
+                return cur.fetchall()
+            conn.commit()
+    else:
+        # SQLite uses ? placeholders
+        if fetch == 'one':
+            return conn.execute(query, params or ()).fetchone()
+        elif fetch == 'all':
+            return conn.execute(query, params or ()).fetchall()
+        else:
+            conn.execute(query, params or ())
+            conn.commit()
 
 def get_or_create_user(google_user_info):
     """Get or create user in database."""
     with get_db_connection() as conn:
-        user = conn.execute(
+        user = execute_query(
+            conn,
             'SELECT * FROM users WHERE google_id = ?',
-            (google_user_info['id'],)
-        ).fetchone()
+            (google_user_info['id'],),
+            fetch='one'
+        )
         
         if user:
             # Update user info
-            conn.execute('''
+            execute_query(conn, '''
                 UPDATE users 
                 SET email = ?, name = ?, picture = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE google_id = ?
             ''', (google_user_info['email'], google_user_info['name'], 
                   google_user_info.get('picture', ''), google_user_info['id']))
-            conn.commit()
             return dict(user)
         else:
             # Create new user
-            cursor = conn.execute('''
-                INSERT INTO users (google_id, email, name, picture)
-                VALUES (?, ?, ?, ?)
-            ''', (google_user_info['id'], google_user_info['email'], 
-                  google_user_info['name'], google_user_info.get('picture', '')))
-            conn.commit()
+            if DATABASE_URL.startswith('postgresql://') and POSTGRES_AVAILABLE:
+                with conn.cursor() as cur:
+                    cur.execute('''
+                        INSERT INTO users (google_id, email, name, picture)
+                        VALUES (%s, %s, %s, %s)
+                        RETURNING id
+                    ''', (google_user_info['id'], google_user_info['email'], 
+                          google_user_info['name'], google_user_info.get('picture', '')))
+                    user_id = cur.fetchone()['id']
+                    conn.commit()
+            else:
+                cursor = conn.execute('''
+                    INSERT INTO users (google_id, email, name, picture)
+                    VALUES (?, ?, ?, ?)
+                ''', (google_user_info['id'], google_user_info['email'], 
+                      google_user_info['name'], google_user_info.get('picture', '')))
+                conn.commit()
+                user_id = cursor.lastrowid
             
-            user_id = cursor.lastrowid
             return {
                 'id': user_id,
                 'google_id': google_user_info['id'],
@@ -136,21 +231,21 @@ def get_or_create_user(google_user_info):
 def update_user_subscription(user_id, stripe_customer_id, subscription_status, subscription_id=None, end_date=None):
     """Update user subscription information."""
     with get_db_connection() as conn:
-        conn.execute('''
+        execute_query(conn, '''
             UPDATE users 
             SET stripe_customer_id = ?, subscription_status = ?, 
                 subscription_id = ?, subscription_end_date = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
         ''', (stripe_customer_id, subscription_status, subscription_id, end_date, user_id))
-        conn.commit()
 
 def is_subscription_active(user_id):
     """Check if user has an active subscription."""
     with get_db_connection() as conn:
-        user = conn.execute(
+        user = execute_query(conn,
             'SELECT subscription_status, subscription_end_date FROM users WHERE id = ?',
-            (user_id,)
-        ).fetchone()
+            (user_id,),
+            fetch='one'
+        )
         
         if not user:
             return False
@@ -158,13 +253,16 @@ def is_subscription_active(user_id):
         if user['subscription_status'] == 'active':
             # Check if subscription hasn't expired
             if user['subscription_end_date']:
-                end_date = datetime.fromisoformat(user['subscription_end_date'])
+                if isinstance(user['subscription_end_date'], str):
+                    end_date = datetime.fromisoformat(user['subscription_end_date'].replace('Z', '+00:00'))
+                else:
+                    end_date = user['subscription_end_date']
                 return datetime.now() < end_date
             return True
             
         return False
 
-# OAuth and Google setup (keeping your existing code)
+# OAuth and Google setup
 client_config = None
 if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
     client_config = {
@@ -179,7 +277,7 @@ if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Azure Speech setup (keeping your existing code)
+# Azure Speech setup
 speech_config = None
 try:
     if AZURE_SPEECH_KEY and AZURE_SPEECH_REGION:
@@ -219,7 +317,7 @@ def subscription_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# Helper functions (keeping your existing ones)
+# Helper functions
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -332,10 +430,11 @@ def debug_user_info():
     
     # Get detailed user info from database
     with get_db_connection() as conn:
-        user = conn.execute(
+        user = execute_query(conn,
             'SELECT * FROM users WHERE id = ?',
-            (user_db['id'],)
-        ).fetchone()
+            (user_db['id'],),
+            fetch='one'
+        )
         
         if user:
             user_dict = dict(user)
@@ -346,13 +445,14 @@ def debug_user_info():
                 "stripe_customer_id": user_dict['stripe_customer_id'],
                 "subscription_status": user_dict['subscription_status'],
                 "subscription_id": user_dict['subscription_id'],
-                "subscription_end_date": user_dict['subscription_end_date'],
-                "created_at": user_dict['created_at'],
-                "updated_at": user_dict['updated_at']
+                "subscription_end_date": str(user_dict['subscription_end_date']) if user_dict['subscription_end_date'] else None,
+                "created_at": str(user_dict['created_at']),
+                "updated_at": str(user_dict['updated_at'])
             })
         else:
             return jsonify({"error": "User not found in database"})
-# Authentication routes (modified to include database user creation)
+
+# Authentication routes
 @app.route('/auth/login')
 def login():
     if not client_config:
@@ -533,8 +633,6 @@ def subscription_status():
         'stripe_customer_id': user_db['stripe_customer_id'] is not None
     })
 
-# Add this to your app.py file - replace the existing webhook handler
-
 # Webhook for Stripe events
 @app.route('/stripe/webhook', methods=['POST'])
 def stripe_webhook():
@@ -596,25 +694,27 @@ def handle_subscription_created(subscription):
         print(f"Processing subscription created: {subscription_id} for customer {customer_id}")
         
         with get_db_connection() as conn:
-            user = conn.execute(
+            user = execute_query(conn,
                 'SELECT id FROM users WHERE stripe_customer_id = ?',
-                (customer_id,)
-            ).fetchone()
+                (customer_id,),
+                fetch='one'
+            )
             
             if user:
                 end_date = datetime.fromtimestamp(subscription['current_period_end'])
-                conn.execute('''
+                execute_query(conn, '''
                     UPDATE users 
                     SET subscription_status = ?, subscription_id = ?, subscription_end_date = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE stripe_customer_id = ?
                 ''', (status, subscription_id, end_date.isoformat(), customer_id))
-                conn.commit()
                 print(f"Updated subscription for user {user['id']}: status={status}")
             else:
                 print(f"No user found for customer {customer_id}")
                 
     except Exception as e:
         print(f"Error in handle_subscription_created: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
 def handle_subscription_updated(subscription):
@@ -626,12 +726,11 @@ def handle_subscription_deleted(subscription):
         customer_id = subscription['customer']
         
         with get_db_connection() as conn:
-            conn.execute('''
+            execute_query(conn, '''
                 UPDATE users 
                 SET subscription_status = 'canceled', subscription_id = NULL, subscription_end_date = NULL, updated_at = CURRENT_TIMESTAMP
                 WHERE stripe_customer_id = ?
             ''', (customer_id,))
-            conn.commit()
             print(f"Canceled subscription for customer {customer_id}")
             
     except Exception as e:
@@ -657,12 +756,11 @@ def handle_payment_failed(invoice):
         customer_id = invoice['customer']
         
         with get_db_connection() as conn:
-            conn.execute('''
+            execute_query(conn, '''
                 UPDATE users 
                 SET subscription_status = 'past_due', updated_at = CURRENT_TIMESTAMP
                 WHERE stripe_customer_id = ?
             ''', (customer_id,))
-            conn.commit()
             print(f"Payment failed for customer {customer_id}")
             
     except Exception as e:
@@ -671,7 +769,7 @@ def handle_payment_failed(invoice):
 
 # Protected transcription routes
 @app.route('/upload', methods=['POST'])
-@subscription_required  # Now requires active subscription
+@subscription_required
 def upload_file():
     if 'file' not in request.files:
         return jsonify({"error": "No file provided"}), 400
@@ -712,11 +810,10 @@ def upload_file():
         # Save transcription to database
         user_db = session['user_db']
         with get_db_connection() as conn:
-            conn.execute('''
+            execute_query(conn, '''
                 INSERT INTO transcriptions (user_id, filename, transcript, word_count, confidence)
                 VALUES (?, ?, ?, ?, ?)
             ''', (user_db['id'], filename, result['transcript'], result['word_count'], result['confidence']))
-            conn.commit()
         
         return jsonify({
             "success": True,
@@ -732,7 +829,7 @@ def upload_file():
         return jsonify({"error": f"Processing failed: {str(e)}"}), 500
 
 @app.route('/download', methods=['POST'])
-@subscription_required  # Now requires active subscription
+@subscription_required
 def download_transcript():
     data = request.get_json()
     if not data or 'transcript' not in data:
@@ -761,6 +858,7 @@ def download_transcript():
 def health_check():
     return jsonify({
         "status": "healthy",
+        "database_type": "PostgreSQL" if (DATABASE_URL.startswith('postgresql://') and POSTGRES_AVAILABLE) else "SQLite",
         "azure_speech_initialized": speech_config is not None,
         "google_oauth_configured": client_config is not None,
         "stripe_configured": stripe.api_key is not None,
