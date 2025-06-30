@@ -1,1074 +1,896 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Speech-to-Text Converter</title>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <style>
-        .drop-zone {
-            border: 3px dashed #007bff;
-            border-radius: 10px;
-            padding: 50px;
-            text-align: center;
-            transition: all 0.3s ease;
-            cursor: pointer;
-            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
-        }
-        
-        .drop-zone:hover, .drop-zone.dragover {
-            border-color: #0056b3;
-            background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
-            transform: translateY(-2px);
-        }
-        
-        .drop-zone.disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
-            border-color: #6c757d;
-        }
-        
-        .progress-container {
-            margin: 20px 0;
-        }
-        
-        .transcript-box {
-            min-height: 200px;
-            max-height: 400px;
-            overflow-y: auto;
-            border: 1px solid #dee2e6;
-            border-radius: 8px;
-            padding: 20px;
-            background-color: #f8f9fa;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            line-height: 1.6;
-        }
-        
-        .stats-card {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border-radius: 10px;
-            padding: 20px;
-            margin: 10px 0;
-        }
-        
-        .btn-custom {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            border: none;
-            color: white;
-            padding: 12px 30px;
-            border-radius: 25px;
-            transition: all 0.3s ease;
-        }
-        
-        .btn-custom:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
-            color: white;
-        }
-        
-        .btn-subscription {
-            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
-            border: none;
-            color: white;
-            padding: 15px 40px;
-            border-radius: 30px;
-            font-size: 1.1rem;
-            transition: all 0.3s ease;
-        }
-        
-        .btn-subscription:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 25px rgba(40, 167, 69, 0.3);
-            color: white;
-        }
-        
-        .file-info {
-            background: #e8f5e8;
-            border: 1px solid #28a745;
-            border-radius: 5px;
-            padding: 10px;
-            margin: 10px 0;
-        }
-        
-        .error-message {
-            background: #f8d7da;
-            border: 1px solid #dc3545;
-            color: #721c24;
-            border-radius: 5px;
-            padding: 15px;
-            margin: 10px 0;
-        }
-        
-        .loading-spinner {
-            display: none;
-            text-align: center;
-            margin: 20px 0;
-        }
-        
-        .hero-section {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 60px 0;
-            margin-bottom: 40px;
-        }
-        
-        .feature-icon {
-            font-size: 3rem;
-            color: #667eea;
-            margin-bottom: 20px;
-        }
-        
-        .subscription-banner {
-            background: linear-gradient(135deg, #ffc107 0%, #ff8c00 100%);
-            color: #212529;
-            padding: 20px;
-            border-radius: 10px;
-            margin: 20px 0;
-            text-align: center;
-            box-shadow: 0 4px 15px rgba(255, 193, 7, 0.3);
-        }
-        
-        .subscription-status {
-            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
-            color: white;
-            padding: 15px;
-            border-radius: 10px;
-            margin: 20px 0;
-            text-align: center;
-        }
-        
-        .pricing-card {
-            background: white;
-            border: 2px solid #dee2e6;
-            border-radius: 15px;
-            padding: 30px;
-            text-align: center;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-            transition: all 0.3s ease;
-        }
-        
-        .pricing-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 15px 40px rgba(0,0,0,0.15);
-        }
-        
-        .pricing-card.featured {
-            border-color: #28a745;
-            transform: scale(1.05);
-        }
-        
-        .price {
-            font-size: 3rem;
-            font-weight: bold;
-            color: #28a745;
-        }
-        
-        .user-info {
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 10px;
-            padding: 15px;
-            margin: 10px 0;
-        }
+import os
+import tempfile
+import uuid
+from datetime import datetime, timedelta
+from flask import Flask, request, jsonify, send_file, session, redirect, url_for
+from flask_cors import CORS
+from werkzeug.utils import secure_filename
+import azure.cognitiveservices.speech as speechsdk
+from google_auth_oauthlib.flow import Flow
+from google.auth.transport.requests import Request
+from google.oauth2 import id_token
+import google.auth.transport.requests
+import requests
+import io
+from pydub import AudioSegment
+from docx import Document
+import json
+from functools import wraps
+import stripe
+import sqlite3
+from contextlib import contextmanager
 
-        .modal-custom .modal-content {
-            border-radius: 15px;
-            border: none;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-        }
+# Try to import PostgreSQL support, fall back to SQLite if not available
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    POSTGRES_AVAILABLE = True
+except ImportError:
+    POSTGRES_AVAILABLE = False
+    print("psycopg2 not available, using SQLite for database operations")
 
-        .modal-custom .modal-header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border-radius: 15px 15px 0 0;
-            border-bottom: none;
-        }
+# Disable OAuth2 HTTPS requirement for local development
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
-        .feature-list {
-            list-style: none;
-            padding: 0;
-        }
+app = Flask(__name__)
+CORS(app, supports_credentials=True, origins=['http://localhost:5000'])
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'dev-secret-key-change-in-production-seriously')
 
-        .feature-list li {
-            padding: 8px 0;
-            border-bottom: 1px solid #eee;
-        }
+# Session configuration
+app.config['SESSION_COOKIE_SECURE'] = False
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 
-        .feature-list li:last-child {
-            border-bottom: none;
-        }
+# Application Configuration
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
+UPLOAD_FOLDER = 'uploads'
+ALLOWED_EXTENSIONS = {'wav', 'mp3', 'aac', 'm4a', 'flac', 'ogg'}
 
-        .feature-list .fas {
-            color: #28a745;
-            margin-right: 10px;
-        }
-    </style>
-</head>
-<body>
-    <!-- Hero Section -->
-    <div class="hero-section">
-        <div class="container">
-            <div class="row justify-content-center text-center">
-                <div class="col-lg-8">
-                    <h1 class="display-4 mb-4">
-                        <i class="fas fa-microphone-alt me-3"></i>
-                        Speech-to-Text Converter
-                    </h1>
-                    <p class="lead">Convert your audio files to text with Microsoft Azure's advanced AI technology. Support for WAV, MP3, AAC, M4A and more.</p>
-                    
-                    <!-- Authentication Section -->
-                    <div id="authSection" class="mt-4">
-                        <div id="loginSection" style="display: none;">
-                            <p class="mb-3">Please sign in with your Google account to use the service.</p>
-                            <button class="btn btn-light btn-lg" id="loginBtn">
-                                <i class="fab fa-google me-2"></i>
-                                Sign in with Google
-                            </button>
-                        </div>
-                        
-                        <div id="userSection" style="display: none;">
-                            <div class="user-info">
-                                <div class="d-flex align-items-center justify-content-center">
-                                    <img id="userAvatar" src="" alt="User Avatar" class="rounded-circle me-3" width="50" height="50" style="display: none;">
-                                    <div>
-                                        <p class="mb-1">Welcome, <strong id="userName"></strong>!</p>
-                                        <div class="btn-group">
-                                            <button class="btn btn-outline-light btn-sm" id="manageSubscriptionBtn" style="display: none;">
-                                                <i class="fas fa-cog me-2"></i>
-                                                Manage Subscription
-                                            </button>
-                                            <button class="btn btn-outline-light btn-sm" id="logoutBtn">
-                                                <i class="fas fa-sign-out-alt me-2"></i>
-                                                Logout
-                                            </button>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+# Environment variables
+GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
+GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
+AZURE_SPEECH_KEY = os.environ.get('AZURE_SPEECH_KEY')
+AZURE_SPEECH_REGION = os.environ.get('AZURE_SPEECH_REGION')
+AZURE_SPEECH_ENDPOINT = os.environ.get('AZURE_SPEECH_ENDPOINT')
 
-                    <!-- Subscription Status -->
-                    <div id="subscriptionStatus" style="display: none;"></div>
-                </div>
-            </div>
-        </div>
-    </div>
+# Stripe Configuration
+stripe.api_key = os.environ.get('STRIPE_SECRET_KEY')
+STRIPE_PUBLISHABLE_KEY = os.environ.get('STRIPE_PUBLISHABLE_KEY')
+STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')
+SUBSCRIPTION_PRICE_ID = os.environ.get('STRIPE_PRICE_ID')  # Your £5/month price ID
 
-    <div class="container">
-        <!-- Subscription Required Banner -->
-        <div id="subscriptionBanner" class="subscription-banner" style="display: none;">
-            <h4><i class="fas fa-crown me-2"></i>Premium Subscription Required</h4>
-            <p class="mb-3">Unlock unlimited audio transcriptions with our premium subscription!</p>
-            <button class="btn btn-subscription" id="subscribeBtn">
-                <i class="fas fa-star me-2"></i>
-                Subscribe for £5/month
-            </button>
-        </div>
+# Database setup
+DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///app.db')
 
-        <!-- Features Section -->
-        <div class="row text-center mb-5">
-            <div class="col-md-4">
-                <i class="fas fa-cloud feature-icon"></i>
-                <h4>Cloud-Powered</h4>
-                <p>Uses Microsoft Azure's Speech-to-Text API for accurate transcriptions</p>
-            </div>
-            <div class="col-md-4">
-                <i class="fas fa-file-audio feature-icon"></i>
-                <h4>Multiple Formats</h4>
-                <p>Supports WAV, MP3, AAC, M4A, FLAC, and OGG files</p>
-            </div>
-            <div class="col-md-4">
-                <i class="fas fa-download feature-icon"></i>
-                <h4>Export Options</h4>
-                <p>Copy text or download as Word document</p>
-            </div>
-        </div>
-
-        <!-- Upload Section -->
-        <div class="row justify-content-center" id="uploadSection" style="display: none;">
-            <div class="col-lg-10">
-                <div class="card shadow-lg">
-                    <div class="card-header bg-primary text-white">
-                        <h3 class="mb-0">
-                            <i class="fas fa-upload me-2"></i>
-                            Upload Audio File
-                        </h3>
-                    </div>
-                    <div class="card-body">
-                        <!-- Drop Zone -->
-                        <div class="drop-zone" id="dropZone">
-                            <i class="fas fa-cloud-upload-alt fa-3x mb-3 text-primary"></i>
-                            <h4>Drag & Drop Your Audio File Here</h4>
-                            <p class="text-muted">or click to browse files</p>
-                            <p class="small text-muted">Supported formats: WAV, MP3, AAC, M4A, FLAC, OGG (Max: 100MB)</p>
-                        </div>
-                        
-                        <input type="file" id="fileInput" accept=".wav,.mp3,.aac,.m4a,.flac,.ogg" style="display: none;">
-                        
-                        <!-- File Info -->
-                        <div id="fileInfo" style="display: none;"></div>
-                        
-                        <!-- Progress Bar -->
-                        <div class="progress-container" style="display: none;" id="progressContainer">
-                            <div class="progress">
-                                <div class="progress-bar progress-bar-striped progress-bar-animated" 
-                                     role="progressbar" style="width: 0%" id="progressBar">
-                                    <span id="progressText">Processing...</span>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <!-- Loading Spinner -->
-                        <div class="loading-spinner" id="loadingSpinner">
-                            <div class="spinner-border text-primary" role="status">
-                                <span class="visually-hidden">Loading...</span>
-                            </div>
-                            <p class="mt-2">Transcribing your audio... This may take a few moments.</p>
-                        </div>
-                        
-                        <!-- Error Messages -->
-                        <div id="errorMessage" style="display: none;"></div>
-                        
-                        <!-- Upload Button -->
-                        <div class="text-center mt-3">
-                            <button class="btn btn-custom" id="uploadBtn" style="display: none;">
-                                <i class="fas fa-magic me-2"></i>
-                                Convert to Text
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Results Section -->
-                <div class="card shadow-lg mt-4" id="resultsSection" style="display: none;">
-                    <div class="card-header bg-success text-white">
-                        <h3 class="mb-0">
-                            <i class="fas fa-file-alt me-2"></i>
-                            Transcription Results
-                        </h3>
-                    </div>
-                    <div class="card-body">
-                        <!-- Stats -->
-                        <div class="row">
-                            <div class="col-md-4">
-                                <div class="stats-card text-center">
-                                    <h5>Word Count</h5>
-                                    <h2 id="wordCount">-</h2>
-                                </div>
-                            </div>
-                            <div class="col-md-4">
-                                <div class="stats-card text-center">
-                                    <h5>Confidence</h5>
-                                    <h2 id="confidence">-</h2>
-                                </div>
-                            </div>
-                            <div class="col-md-4">
-                                <div class="stats-card text-center">
-                                    <h5>Status</h5>
-                                    <h2><i class="fas fa-check-circle"></i></h2>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <!-- Transcript -->
-                        <div class="mt-4">
-                            <h4>Transcript:</h4>
-                            <div class="transcript-box" id="transcript"></div>
-                        </div>
-                        
-                        <!-- Action Buttons -->
-                        <div class="text-center mt-4">
-                            <button class="btn btn-outline-primary me-2" id="copyBtn">
-                                <i class="fas fa-copy me-2"></i>
-                                Copy Text
-                            </button>
-                            <button class="btn btn-custom" id="downloadBtn">
-                                <i class="fas fa-download me-2"></i>
-                                Download as Word Doc
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Subscription Modal -->
-    <div class="modal fade modal-custom" id="subscriptionModal" tabindex="-1" aria-labelledby="subscriptionModalLabel" aria-hidden="true">
-        <div class="modal-dialog modal-lg">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title" id="subscriptionModalLabel">
-                        <i class="fas fa-crown me-2"></i>
-                        Premium Subscription
-                    </h5>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="row justify-content-center">
-                        <div class="col-md-8">
-                            <div class="pricing-card featured">
-                                <div class="mb-4">
-                                    <i class="fas fa-star text-warning fa-3x"></i>
-                                    <h3 class="mt-3">Premium Plan</h3>
-                                </div>
-                                
-                                <div class="price mb-4">
-                                    £5<span class="fs-6 text-muted">/month</span>
-                                </div>
-                                
-                                <ul class="feature-list mb-4">
-                                    <li><i class="fas fa-check"></i> Unlimited audio transcriptions</li>
-                                    <li><i class="fas fa-check"></i> Support for all audio formats</li>
-                                    <li><i class="fas fa-check"></i> High-quality Azure AI transcription</li>
-                                    <li><i class="fas fa-check"></i> Word document downloads</li>
-                                    <li><i class="fas fa-check"></i> Files up to 100MB</li>
-                                    <li><i class="fas fa-check"></i> Priority support</li>
-                                    <li><i class="fas fa-check"></i> Cancel anytime</li>
-                                </ul>
-                                
-                                <button class="btn btn-subscription w-100" id="modalSubscribeBtn">
-                                    <i class="fas fa-credit-card me-2"></i>
-                                    Start Subscription
-                                </button>
-                                
-                                <p class="small text-muted mt-3">
-                                    Secure payment powered by Stripe. Cancel anytime from your account settings.
-                                </p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Footer -->
-    <footer class="bg-dark text-white text-center py-4 mt-5">
-        <div class="container">
-            <p>&copy; 2025 Speech-to-Text Converter. Powered by Microsoft Azure Speech Services.</p>
-            <p class="small">Secure payments by <i class="fab fa-stripe"></i> Stripe</p>
-        </div>
-    </footer>
-
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/js/bootstrap.bundle.min.js"></script>
-    <script>
-        const API_BASE = '';  // Use relative URLs since frontend is served by Flask
-        
-        let selectedFile = null;
-        let currentTranscript = '';
-        let currentFilename = '';
-        let isAuthenticated = false;
-        let currentUser = null;
-        let subscriptionActive = false;
-        let subscriptionStatus = 'inactive';
-
-        // DOM Elements
-        const dropZone = document.getElementById('dropZone');
-        const fileInput = document.getElementById('fileInput');
-        const fileInfo = document.getElementById('fileInfo');
-        const uploadBtn = document.getElementById('uploadBtn');
-        const progressContainer = document.getElementById('progressContainer');
-        const progressBar = document.getElementById('progressBar');
-        const progressText = document.getElementById('progressText');
-        const loadingSpinner = document.getElementById('loadingSpinner');
-        const errorMessage = document.getElementById('errorMessage');
-        const resultsSection = document.getElementById('resultsSection');
-        const transcript = document.getElementById('transcript');
-        const wordCount = document.getElementById('wordCount');
-        const confidence = document.getElementById('confidence');
-        const copyBtn = document.getElementById('copyBtn');
-        const downloadBtn = document.getElementById('downloadBtn');
-        
-        // Auth elements
-        const authSection = document.getElementById('authSection');
-        const loginSection = document.getElementById('loginSection');
-        const userSection = document.getElementById('userSection');
-        const loginBtn = document.getElementById('loginBtn');
-        const logoutBtn = document.getElementById('logoutBtn');
-        const userName = document.getElementById('userName');
-        const userAvatar = document.getElementById('userAvatar');
-        const uploadSection = document.getElementById('uploadSection');
-        
-        // Subscription elements
-        const subscriptionBanner = document.getElementById('subscriptionBanner');
-        const subscriptionStatusDiv = document.getElementById('subscriptionStatus');
-        const subscribeBtn = document.getElementById('subscribeBtn');
-        const modalSubscribeBtn = document.getElementById('modalSubscribeBtn');
-        const manageSubscriptionBtn = document.getElementById('manageSubscriptionBtn');
-        const subscriptionModal = new bootstrap.Modal(document.getElementById('subscriptionModal'));
-
-        // Event Listeners
-        dropZone.addEventListener('click', handleDropZoneClick);
-        dropZone.addEventListener('dragover', handleDragOver);
-        dropZone.addEventListener('drop', handleDrop);
-        dropZone.addEventListener('dragenter', e => e.preventDefault());
-        dropZone.addEventListener('dragleave', handleDragLeave);
-        
-        fileInput.addEventListener('change', handleFileSelect);
-        uploadBtn.addEventListener('click', uploadFile);
-        copyBtn.addEventListener('click', copyTranscript);
-        downloadBtn.addEventListener('click', downloadDocument);
-        
-        // Auth event listeners
-        loginBtn.addEventListener('click', initiateLogin);
-        logoutBtn.addEventListener('click', logout);
-        
-        // Subscription event listeners
-        subscribeBtn.addEventListener('click', () => subscriptionModal.show());
-        modalSubscribeBtn.addEventListener('click', startSubscription);
-        manageSubscriptionBtn.addEventListener('click', openCustomerPortal);
-
-        // Authentication functions
-        async function checkAuthStatus() {
-            try {
-                const response = await fetch(`${API_BASE}/auth/user`, {
-                    credentials: 'include'
-                });
-                const data = await response.json();
+def init_db():
+    """Initialize the database with required tables."""
+    if DATABASE_URL.startswith('postgresql://') and POSTGRES_AVAILABLE:
+        # PostgreSQL initialization
+        try:
+            conn = psycopg2.connect(DATABASE_URL)
+            with conn.cursor() as cur:
+                cur.execute('''
+                    CREATE TABLE IF NOT EXISTS users (
+                        id SERIAL PRIMARY KEY,
+                        google_id TEXT UNIQUE NOT NULL,
+                        email TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        picture TEXT,
+                        stripe_customer_id TEXT,
+                        subscription_status TEXT DEFAULT 'inactive',
+                        subscription_id TEXT,
+                        subscription_end_date TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
                 
-                if (data.authenticated) {
-                    isAuthenticated = true;
-                    currentUser = data.user;
-                    subscriptionActive = data.subscription_active || false;
-                    subscriptionStatus = data.subscription_status || 'inactive';
-                    showUserSection();
-                    await checkSubscriptionStatus();
-                } else {
-                    isAuthenticated = false;
-                    currentUser = null;
-                    subscriptionActive = false;
-                    showLoginSection();
-                }
-            } catch (error) {
-                console.error('Auth check failed:', error);
-                showLoginSection();
-            }
-        }
-
-        async function checkSubscriptionStatus() {
-            if (!isAuthenticated) return;
+                cur.execute('''
+                    CREATE TABLE IF NOT EXISTS transcriptions (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        filename TEXT NOT NULL,
+                        transcript TEXT NOT NULL,
+                        word_count INTEGER,
+                        confidence REAL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (user_id) REFERENCES users (id)
+                    )
+                ''')
+            conn.commit()
+            conn.close()
+            print("PostgreSQL database initialized successfully")
+        except Exception as e:
+            print(f"PostgreSQL initialization failed: {e}")
+    else:
+        # SQLite fallback
+        database_file = DATABASE_URL.replace('sqlite:///', '') if DATABASE_URL.startswith('sqlite://') else 'app.db'
+        with sqlite3.connect(database_file) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    google_id TEXT UNIQUE NOT NULL,
+                    email TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    picture TEXT,
+                    stripe_customer_id TEXT,
+                    subscription_status TEXT DEFAULT 'inactive',
+                    subscription_id TEXT,
+                    subscription_end_date DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
             
-            try {
-                const response = await fetch(`${API_BASE}/api/subscription/status`, {
-                    credentials: 'include'
-                });
-                const data = await response.json();
-                
-                subscriptionActive = data.subscription_active;
-                subscriptionStatus = data.subscription_status;
-                
-                updateSubscriptionUI();
-            } catch (error) {
-                console.error('Subscription check failed:', error);
-            }
-        }
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS transcriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    filename TEXT NOT NULL,
+                    transcript TEXT NOT NULL,
+                    word_count INTEGER,
+                    confidence REAL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users (id)
+                )
+            ''')
+        print("SQLite database initialized successfully")
 
-        function updateSubscriptionUI() {
-            if (!isAuthenticated) {
-                subscriptionBanner.style.display = 'none';
-                subscriptionStatusDiv.style.display = 'none';
-                uploadSection.style.display = 'none';
-                return;
-            }
+@contextmanager
+def get_db_connection():
+    """Context manager for database connections."""
+    if DATABASE_URL.startswith('postgresql://') and POSTGRES_AVAILABLE:
+        # PostgreSQL connection
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        try:
+            yield conn
+        finally:
+            conn.close()
+    else:
+        # SQLite fallback
+        database_file = DATABASE_URL.replace('sqlite:///', '') if DATABASE_URL.startswith('sqlite://') else 'app.db'
+        conn = sqlite3.connect(database_file)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+def execute_query(conn, query, params=None, fetch=False):
+    """Execute query with proper syntax for PostgreSQL or SQLite."""
+    if DATABASE_URL.startswith('postgresql://') and POSTGRES_AVAILABLE:
+        # PostgreSQL uses %s placeholders
+        pg_query = query.replace('?', '%s')
+        with conn.cursor() as cur:
+            cur.execute(pg_query, params or ())
+            if fetch == 'one':
+                return cur.fetchone()
+            elif fetch == 'all':
+                return cur.fetchall()
+            conn.commit()
+    else:
+        # SQLite uses ? placeholders
+        if fetch == 'one':
+            return conn.execute(query, params or ()).fetchone()
+        elif fetch == 'all':
+            return conn.execute(query, params or ()).fetchall()
+        else:
+            conn.execute(query, params or ())
+            conn.commit()
+
+def get_or_create_user(google_user_info):
+    """Get or create user in database."""
+    with get_db_connection() as conn:
+        user = execute_query(
+            conn,
+            'SELECT * FROM users WHERE google_id = ?',
+            (google_user_info['id'],),
+            fetch='one'
+        )
+        
+        if user:
+            # Update user info
+            execute_query(conn, '''
+                UPDATE users 
+                SET email = ?, name = ?, picture = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE google_id = ?
+            ''', (google_user_info['email'], google_user_info['name'], 
+                  google_user_info.get('picture', ''), google_user_info['id']))
+            return dict(user)
+        else:
+            # Create new user
+            if DATABASE_URL.startswith('postgresql://') and POSTGRES_AVAILABLE:
+                with conn.cursor() as cur:
+                    cur.execute('''
+                        INSERT INTO users (google_id, email, name, picture)
+                        VALUES (%s, %s, %s, %s)
+                        RETURNING id
+                    ''', (google_user_info['id'], google_user_info['email'], 
+                          google_user_info['name'], google_user_info.get('picture', '')))
+                    user_id = cur.fetchone()['id']
+                    conn.commit()
+            else:
+                cursor = conn.execute('''
+                    INSERT INTO users (google_id, email, name, picture)
+                    VALUES (?, ?, ?, ?)
+                ''', (google_user_info['id'], google_user_info['email'], 
+                      google_user_info['name'], google_user_info.get('picture', '')))
+                conn.commit()
+                user_id = cursor.lastrowid
             
-            if (subscriptionActive) {
-                // Active subscription
-                subscriptionBanner.style.display = 'none';
-                subscriptionStatusDiv.innerHTML = `
-                    <div class="subscription-status">
-                        <i class="fas fa-check-circle me-2"></i>
-                        Premium Subscription Active
-                        <p class="mb-0 small">Unlimited transcriptions available</p>
-                    </div>
-                `;
-                subscriptionStatusDiv.style.display = 'block';
-                uploadSection.style.display = 'block';
-                manageSubscriptionBtn.style.display = 'inline-block';
-                
-                // Enable upload functionality
-                dropZone.classList.remove('disabled');
-                dropZone.style.pointerEvents = 'auto';
-                
-            } else {
-                // No active subscription
-                uploadSection.style.display = 'block';
-                subscriptionStatusDiv.style.display = 'none';
-                manageSubscriptionBtn.style.display = subscriptionStatus !== 'inactive' ? 'inline-block' : 'none';
-                
-                // Show subscription banner
-                let bannerMessage = '';
-                if (subscriptionStatus === 'canceled') {
-                    bannerMessage = 'Your subscription has been canceled. Reactivate to continue using the service.';
-                } else if (subscriptionStatus === 'past_due') {
-                    bannerMessage = 'Your payment is past due. Please update your payment method.';
-                } else {
-                    bannerMessage = 'Unlock unlimited audio transcriptions with our premium subscription!';
-                }
-                
-                subscriptionBanner.innerHTML = `
-                    <h4><i class="fas fa-crown me-2"></i>Premium Subscription Required</h4>
-                    <p class="mb-3">${bannerMessage}</p>
-                    <button class="btn btn-subscription" id="subscribeBtn">
-                        <i class="fas fa-star me-2"></i>
-                        Subscribe for £5/month
-                    </button>
-                `;
-                subscriptionBanner.style.display = 'block';
-                
-                // Re-attach event listener to new button
-                document.getElementById('subscribeBtn').addEventListener('click', () => subscriptionModal.show());
-                
-                // Disable upload functionality
-                dropZone.classList.add('disabled');
-                dropZone.style.pointerEvents = 'none';
+            return {
+                'id': user_id,
+                'google_id': google_user_info['id'],
+                'email': google_user_info['email'],
+                'name': google_user_info['name'],
+                'picture': google_user_info.get('picture', ''),
+                'stripe_customer_id': None,
+                'subscription_status': 'inactive'
             }
-        }
 
-        function showLoginSection() {
-            loginSection.style.display = 'block';
-            userSection.style.display = 'none';
-            uploadSection.style.display = 'none';
-            subscriptionBanner.style.display = 'none';
-            subscriptionStatusDiv.style.display = 'none';
-        }
+def update_user_subscription(user_id, stripe_customer_id, subscription_status, subscription_id=None, end_date=None):
+    """Update user subscription information."""
+    with get_db_connection() as conn:
+        # Ensure end_date is a datetime object if not None, for consistent database storage
+        if isinstance(end_date, str):
+            # This might happen if a string was passed from a previous state or a different source
+            try:
+                end_date = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            except ValueError:
+                print(f"Warning: Could not parse end_date string '{end_date}'. Storing as None.")
+                end_date = None
+        
+        execute_query(conn, '''
+            UPDATE users 
+            SET stripe_customer_id = ?, subscription_status = ?, 
+                subscription_id = ?, subscription_end_date = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (stripe_customer_id, subscription_status, subscription_id, end_date, user_id)) # Pass datetime object directly
 
-        function showUserSection() {
-            loginSection.style.display = 'none';
-            userSection.style.display = 'block';
+def is_subscription_active(user_id):
+    """Check if user has an active subscription."""
+    with get_db_connection() as conn:
+        user = execute_query(conn,
+            'SELECT subscription_status, subscription_end_date FROM users WHERE id = ?',
+            (user_id,),
+            fetch='one'
+        )
+        
+        if not user:
+            return False
             
-            userName.textContent = currentUser.name;
-            if (currentUser.picture) {
-                userAvatar.src = currentUser.picture;
-                userAvatar.style.display = 'block';
-            }
-        }
-
-        async function initiateLogin() {
-            try {
-                const response = await fetch(`${API_BASE}/auth/login`, {
-                    credentials: 'include'
-                });
-                const data = await response.json();
-                
-                if (data.auth_url) {
-                    window.location.href = data.auth_url;
-                } else {
-                    showError('Login failed: No authorization URL received');
-                }
-            } catch (error) {
-                showError(`Login failed: ${error.message}`);
-            }
-        }
-
-        async function logout() {
-            try {
-                await fetch(`${API_BASE}/auth/logout`, {
-                    method: 'POST',
-                    credentials: 'include'
-                });
-                
-                isAuthenticated = false;
-                currentUser = null;
-                subscriptionActive = false;
-                subscriptionStatus = 'inactive';
-                showLoginSection();
-                
-                // Clear any results
-                resultsSection.style.display = 'none';
-                hideError();
-                
-            } catch (error) {
-                showError(`Logout failed: ${error.message}`);
-            }
-        }
-
-        // Subscription functions
-        async function startSubscription() {
-            if (!isAuthenticated) {
-                showError('Please log in first');
-                return;
-            }
+        if user['subscription_status'] == 'active':
+            # Check if subscription hasn't expired
+            if user['subscription_end_date']:
+                if isinstance(user['subscription_end_date'], str):
+                    end_date = datetime.fromisoformat(user['subscription_end_date'].replace('Z', '+00:00'))
+                else:
+                    end_date = user['subscription_end_date']
+                return datetime.now() < end_date
+            return True # If no end_date, assume perpetual active (unlikely for subscriptions but defensively coded)
             
-            try {
-                modalSubscribeBtn.disabled = true;
-                modalSubscribeBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Creating session...';
+        return False
+
+# OAuth and Google setup
+client_config = None
+if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
+    client_config = {
+        "web": {
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": ["http://localhost:5000/auth/callback"]
+        }
+    }
+
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+# Azure Speech setup
+speech_config = None
+try:
+    if AZURE_SPEECH_KEY and AZURE_SPEECH_REGION:
+        speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
+        if AZURE_SPEECH_ENDPOINT:
+            speech_config.endpoint_id = AZURE_SPEECH_ENDPOINT
+        speech_config.speech_recognition_language = "en-US"
+        speech_config.output_format = speechsdk.OutputFormat.Detailed
+        print("Azure Speech client initialized successfully.")
+    else:
+        print("Warning: AZURE_SPEECH_KEY or AZURE_SPEECH_REGION not set.")
+except Exception as e:
+    print(f"Warning: Azure Speech client initialization failed: {e}")
+    speech_config = None
+
+# Authentication decorators
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user' not in session:
+            return jsonify({"error": "Authentication required", "redirect": "/auth/login"}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+def subscription_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user' not in session:
+            return jsonify({"error": "Authentication required", "redirect": "/auth/login"}), 401
+        
+        if not is_subscription_active(session['user_db']['id']):
+            return jsonify({
+                "error": "Active subscription required", 
+                "redirect": "/subscription",
+                "subscription_status": "inactive"
+            }), 402  # Payment Required
+        return f(*args, **kwargs)
+    return decorated_function
+
+# Helper functions
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def convert_to_wav(input_path, output_path):
+    try:
+        audio = AudioSegment.from_file(input_path)
+        audio = audio.set_channels(1).set_frame_rate(16000).set_sample_width(2)
+        audio.export(output_path, format="wav")
+    except Exception as e:
+        print(f"Audio conversion error: {e}")
+        return False
+    return True
+
+def transcribe_audio(audio_path):
+    if not speech_config:
+        return {"error": "Azure Speech client not initialized."}
+    
+    try:
+        audio_config = speechsdk.audio.AudioConfig(filename=audio_path)
+        speech_recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
+        
+        done = False
+        results = []
+        
+        def stop_cb(evt):
+            nonlocal done
+            done = True
+        
+        def recognized_cb(evt):
+            if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                results.append({
+                    'text': evt.result.text,
+                    'confidence': evt.result.properties.get(speechsdk.PropertyId.SpeechServiceResponse_JsonResult, '{}')
+                })
+        
+        speech_recognizer.recognized.connect(recognized_cb)
+        speech_recognizer.session_stopped.connect(stop_cb)
+        speech_recognizer.canceled.connect(stop_cb)
+        
+        speech_recognizer.start_continuous_recognition()
+        
+        import time
+        timeout = 300
+        start_time = time.time()
+        
+        while not done and (time.time() - start_time) < timeout:
+            time.sleep(0.5)
+        
+        speech_recognizer.stop_continuous_recognition()
+        
+        if not results:
+            return {"error": "No speech recognized in the audio file."}
+        
+        full_transcript = " ".join([result['text'] for result in results])
+        word_count = len(full_transcript.split()) if full_transcript else 0
+        
+        return {
+            "transcript": full_transcript,
+            "confidence": 0.85,
+            "word_count": word_count
+        }
+        
+    except Exception as e:
+        return {"error": f"Transcription failed: {str(e)}"}
+
+def create_docx(transcript, filename="transcript"):
+    doc = Document()
+    header = doc.sections[0].header
+    header_para = header.paragraphs[0]
+    header_para.text = f"Audio Transcript - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    
+    title = doc.add_heading('Audio Transcription', 0)
+    doc.add_paragraph(transcript)
+    
+    footer = doc.sections[0].footer
+    footer_para = footer.paragraphs[0]
+    footer_para.text = f"Word count: {len(transcript.split())} words"
+    
+    temp_path = os.path.join(tempfile.gettempdir(), f"{filename}_{uuid.uuid4().hex}.docx")
+    doc.save(temp_path)
+    return temp_path
+
+# Routes
+@app.route('/')
+def index():
+    return send_file('index.html')
+
+@app.route('/api/status')
+def api_status():
+    user_status = {}
+    if 'user' in session and 'user_db' in session:
+        user_status = {
+            "authenticated": True,
+            "user": session['user']['name'],
+            "subscription_active": is_subscription_active(session['user_db']['id']),
+            "subscription_status": session['user_db']['subscription_status']
+        }
+    else:
+        user_status = {"authenticated": False}
+    
+    return jsonify({
+        "message": "Speech-to-Text API is running",
+        **user_status
+    })
+
+@app.route('/debug/user-info')
+@login_required
+def debug_user_info():
+    user_db = session['user_db']
+    
+    # Get detailed user info from database
+    with get_db_connection() as conn:
+        user = execute_query(conn,
+            'SELECT * FROM users WHERE id = ?',
+            (user_db['id'],),
+            fetch='one'
+        )
+        
+        if user:
+            user_dict = dict(user)
+            # Don't expose sensitive data in debug
+            return jsonify({
+                "user_id": user_dict['id'],
+                "email": user_dict['email'],
+                "stripe_customer_id": user_dict['stripe_customer_id'],
+                "subscription_status": user_dict['subscription_status'],
+                "subscription_id": user_dict['subscription_id'],
+                "subscription_end_date": str(user_dict['subscription_end_date']) if user_dict['subscription_end_date'] else None,
+                "created_at": str(user_dict['created_at']),
+                "updated_at": str(user_dict['updated_at'])
+            })
+        else:
+            return jsonify({"error": "User not found in database"})
+
+# Authentication routes
+@app.route('/auth/login')
+def login():
+    if not client_config:
+        return jsonify({"error": "Google OAuth not configured"}), 500
+    
+    try:
+        google_scopes = [
+            'openid',
+            'https://www.googleapis.com/auth/userinfo.email',
+            'https://www.googleapis.com/auth/userinfo.profile'
+        ]
+        
+        flow = Flow.from_client_config(client_config, scopes=google_scopes)
+        flow.redirect_uri = url_for('auth_callback', _external=True)
+        
+        authorization_url, state = flow.authorization_url(
+            access_type='offline',
+            include_granted_scopes='true'
+        )
+        
+        session['state'] = state
+        session['oauth_scopes'] = google_scopes
+        
+        return jsonify({"auth_url": authorization_url})
+    
+    except Exception as e:
+        return jsonify({"error": f"Login failed: {str(e)}"}), 500
+
+@app.route('/auth/callback')
+def auth_callback():
+    if not client_config:
+        return jsonify({"error": "Google OAuth not configured"}), 500
+    
+    try:
+        if 'state' not in session or request.args.get('state') != session['state']:
+            return redirect('/?auth=error')
+        
+        flow = Flow.from_client_config(
+            client_config,
+            scopes=[
+                'openid',
+                'https://www.googleapis.com/auth/userinfo.email',
+                'https://www.googleapis.com/auth/userinfo.profile'
+            ],
+            state=session['state']
+        )
+        flow.redirect_uri = url_for('auth_callback', _external=True)
+        
+        flow.fetch_token(authorization_response=request.url)
+        
+        credentials = flow.credentials
+        request_session = google.auth.transport.requests.Request()
+        
+        id_info = id_token.verify_oauth2_token(
+            credentials.id_token,
+            request_session,
+            GOOGLE_CLIENT_ID
+        )
+        
+        # Store Google user info in session
+        session['user'] = {
+            'id': id_info['sub'],
+            'email': id_info['email'],
+            'name': id_info['name'],
+            'picture': id_info.get('picture', ''),
+            'verified_email': id_info.get('email_verified', False)
+        }
+        
+        # Get or create user in database
+        user_db = get_or_create_user(session['user'])
+        session['user_db'] = user_db
+        
+        session.pop('state', None)
+        session.pop('oauth_scopes', None)
+        
+        return redirect('/?auth=success')
+        
+    except Exception as e:
+        print(f"Authentication error: {e}")
+        session.pop('state', None)
+        session.pop('oauth_scopes', None)
+        return redirect('/?auth=error')
+
+@app.route('/auth/logout', methods=['POST'])
+def logout():
+    session.clear()
+    return jsonify({"message": "Logged out successfully"})
+
+@app.route('/auth/user')
+def get_user():
+    if 'user' in session and 'user_db' in session:
+        return jsonify({
+            "authenticated": True,
+            "user": session['user'],
+            "subscription_active": is_subscription_active(session['user_db']['id']),
+            "subscription_status": session['user_db']['subscription_status']
+        })
+    else:
+        return jsonify({"authenticated": False, "user": None})
+
+# Subscription routes
+@app.route('/api/subscription/create-checkout-session', methods=['POST'])
+@login_required
+def create_checkout_session():
+    try:
+        user_db = session['user_db']
+        
+        # Create or get Stripe customer
+        if not user_db['stripe_customer_id']:
+            customer = stripe.Customer.create(
+                email=session['user']['email'],
+                name=session['user']['name']
+            )
+            customer_id = customer.id
+            
+            # Update user with Stripe customer ID
+            update_user_subscription(user_db['id'], customer_id, user_db['subscription_status'])
+            session['user_db']['stripe_customer_id'] = customer_id
+        else:
+            customer_id = user_db['stripe_customer_id']
+        
+        # Create checkout session
+        checkout_session = stripe.checkout.Session.create(
+            customer=customer_id,
+            payment_method_types=['card'],
+            line_items=[{
+                'price': SUBSCRIPTION_PRICE_ID,
+                'quantity': 1,
+            }],
+            mode='subscription',
+            success_url=url_for('subscription_success', _external=True),
+            cancel_url=url_for('subscription_cancel', _external=True),
+            metadata={'user_id': str(user_db['id'])}
+        )
+        
+        return jsonify({'checkout_url': checkout_session.url})
+        
+    except Exception as e:
+        print(f"Checkout session creation failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/subscription/success')
+def subscription_success():
+    return redirect('/?subscription=success')
+
+@app.route('/subscription/cancel')
+def subscription_cancel():
+    return redirect('/?subscription=cancelled')
+
+@app.route('/api/subscription/portal', methods=['POST'])
+@login_required
+def customer_portal():
+    try:
+        user_db = session['user_db']
+        
+        if not user_db['stripe_customer_id']:
+            return jsonify({'error': 'No Stripe customer found'}), 400
+        
+        portal_session = stripe.billing_portal.Session.create(
+            customer=user_db['stripe_customer_id'],
+            return_url=url_for('index', _external=True)
+        )
+        
+        return jsonify({'portal_url': portal_session.url})
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/subscription/status')
+@login_required
+def subscription_status():
+    user_db = session['user_db']
+    is_active = is_subscription_active(user_db['id'])
+    
+    return jsonify({
+        'subscription_active': is_active,
+        'subscription_status': user_db['subscription_status'],
+        'stripe_customer_id': user_db['stripe_customer_id'] is not None
+    })
+
+# Webhook for Stripe events
+@app.route('/stripe/webhook', methods=['POST'])
+def stripe_webhook():
+    payload = request.get_data(as_text=True)
+    sig_header = request.headers.get('Stripe-Signature')
+    
+    try:
+        # Verify webhook signature
+        if STRIPE_WEBHOOK_SECRET:
+            event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+        else:
+            # For testing without webhook secret
+            event = json.loads(payload)
+            print("Warning: Processing webhook without signature verification (STRIPE_WEBHOOK_SECRET not set).")
+        
+        print(f"Webhook received: {event['type']} (Event ID: {event['id']})")
+        
+    except ValueError as e:
+        print(f"Invalid payload: {e}")
+        return 'Invalid payload', 400
+    except stripe.error.SignatureVerificationError as e:
+        print(f"Invalid signature: {e}")
+        return 'Invalid signature', 400
+    
+    try:
+        # Handle subscription events
+        if event['type'] == 'customer.subscription.created':
+            subscription = event['data']['object']
+            handle_subscription_created(subscription)
+        elif event['type'] == 'customer.subscription.updated':
+            subscription = event['data']['object']
+            handle_subscription_updated(subscription)
+        elif event['type'] == 'customer.subscription.deleted':
+            subscription = event['data']['object']
+            handle_subscription_deleted(subscription)
+        elif event['type'] == 'invoice.payment_succeeded':
+            invoice = event['data']['object']
+            handle_payment_succeeded(invoice)
+        elif event['type'] == 'invoice.payment_failed':
+            invoice = event['data']['object']
+            handle_payment_failed(invoice)
+        else:
+            print(f"Unhandled event type: {event['type']}")
+        
+        return 'Success', 200
+        
+    except Exception as e:
+        print(f"Webhook processing error for event {event.get('id', 'N/A')}: {e}")
+        import traceback
+        traceback.print_exc()
+        return 'Webhook processing failed', 500
+
+def handle_subscription_created(subscription):
+    try:
+        customer_id = subscription['customer']
+        subscription_id = subscription['id']
+        status = subscription['status']
+        
+        print(f"handle_subscription_created: Processing subscription {subscription_id} for customer {customer_id} with status {status}")
+        
+        with get_db_connection() as conn:
+            user = execute_query(conn,
+                'SELECT id FROM users WHERE stripe_customer_id = ?',
+                (customer_id,),
+                fetch='one'
+            )
+            
+            if user:
+                user_id = user['id']
+                # Convert Unix timestamp to datetime object
+                # Stripe's current_period_end is a Unix timestamp (integer)
+                end_date = datetime.fromtimestamp(subscription['current_period_end'])
                 
-                const response = await fetch(`${API_BASE}/api/subscription/create-checkout-session`, {
-                    method: 'POST',
-                    credentials: 'include'
-                });
+                print(f"handle_subscription_created: Found user {user_id}. Updating subscription to status='{status}', id='{subscription_id}', end_date='{end_date}'")
                 
-                const data = await response.json();
+                execute_query(conn, '''
+                    UPDATE users 
+                    SET subscription_status = ?, subscription_id = ?, subscription_end_date = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE stripe_customer_id = ?
+                ''', (status, subscription_id, end_date, customer_id)) # FIX: Pass datetime object directly
                 
-                if (response.ok && data.checkout_url) {
-                    // Redirect to Stripe Checkout
-                    window.location.href = data.checkout_url;
-                } else {
-                    throw new Error(data.error || 'Failed to create checkout session');
-                }
+                print(f"handle_subscription_created: Successfully updated subscription for user {user_id}")
+            else:
+                print(f"handle_subscription_created: No user found in DB for Stripe customer ID: {customer_id}. This subscription will not be recorded.")
+                # You might want to add logic here to create a user or link to an existing one by email
+                # if this scenario is expected (e.g., customer created in Stripe first).
                 
-            } catch (error) {
-                showError(`Subscription failed: ${error.message}`);
-                modalSubscribeBtn.disabled = false;
-                modalSubscribeBtn.innerHTML = '<i class="fas fa-credit-card me-2"></i>Start Subscription';
-            }
-        }
+    except Exception as e:
+        print(f"Error in handle_subscription_created for subscription {subscription.get('id', 'N/A')}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise # Re-raise to ensure the 500 is sent back to Stripe for visibility.
 
-        async function openCustomerPortal() {
-            try {
-                manageSubscriptionBtn.disabled = true;
-                manageSubscriptionBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Loading...';
-                
-                const response = await fetch(`${API_BASE}/api/subscription/portal`, {
-                    method: 'POST',
-                    credentials: 'include'
-                });
-                
-                const data = await response.json();
-                
-                if (response.ok && data.portal_url) {
-                    // Redirect to Stripe Customer Portal
-                    window.location.href = data.portal_url;
-                } else {
-                    throw new Error(data.error || 'Failed to open customer portal');
-                }
-                
-            } catch (error) {
-                showError(`Failed to open portal: ${error.message}`);
-            } finally {
-                manageSubscriptionBtn.disabled = false;
-                manageSubscriptionBtn.innerHTML = '<i class="fas fa-cog me-2"></i>Manage Subscription';
-            }
-        }
+def handle_subscription_updated(subscription):
+    # Same logic as created, but adding a specific print for clarity
+    print(f"handle_subscription_updated: Processing subscription update for {subscription.get('id', 'N/A')}")
+    handle_subscription_created(subscription)
 
-        // File handling functions
-        function handleDropZoneClick() {
-            if (!subscriptionActive) {
-                subscriptionModal.show();
-                return;
-            }
-            fileInput.click();
-        }
-
-        function handleDragOver(e) {
-            e.preventDefault();
-            if (subscriptionActive) {
-                dropZone.classList.add('dragover');
-            }
-        }
-
-        function handleDragLeave(e) {
-            e.preventDefault();
-            dropZone.classList.remove('dragover');
-        }
-
-        function handleDrop(e) {
-            e.preventDefault();
-            dropZone.classList.remove('dragover');
+def handle_subscription_deleted(subscription):
+    try:
+        customer_id = subscription['customer']
+        
+        print(f"handle_subscription_deleted: Processing subscription deletion for customer {customer_id}")
+        
+        with get_db_connection() as conn:
+            execute_query(conn, '''
+                UPDATE users 
+                SET subscription_status = 'canceled', subscription_id = NULL, subscription_end_date = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE stripe_customer_id = ?
+            ''', (customer_id,))
+            print(f"handle_subscription_deleted: Canceled subscription for customer {customer_id}")
             
-            if (!subscriptionActive) {
-                subscriptionModal.show();
-                return;
-            }
+    except Exception as e:
+        print(f"Error in handle_subscription_deleted: {e}")
+        raise
+
+def handle_payment_succeeded(invoice):
+    try:
+        if invoice.get('subscription'):
+            # Fetch the subscription to get updated info
+            subscription = stripe.Subscription.retrieve(invoice['subscription'])
+            print(f"handle_payment_succeeded: Payment succeeded for subscription {invoice['subscription']}. Calling handle_subscription_created.")
+            handle_subscription_created(subscription)
+        else:
+            print(f"handle_payment_succeeded: Payment succeeded for non-subscription invoice {invoice.get('id', 'N/A')}")
             
-            const files = e.dataTransfer.files;
-            if (files.length > 0) {
-                handleFile(files[0]);
-            }
-        }
+    except Exception as e:
+        print(f"Error in handle_payment_succeeded: {e}")
+        raise
 
-        function handleFileSelect(e) {
-            const files = e.target.files;
-            if (files.length > 0) {
-                handleFile(files[0]);
-            }
-        }
-
-        function handleFile(file) {
-            if (!subscriptionActive) {
-                subscriptionModal.show();
-                return;
-            }
+def handle_payment_failed(invoice):
+    try:
+        customer_id = invoice['customer']
+        
+        print(f"handle_payment_failed: Payment failed for customer {customer_id}")
+        
+        with get_db_connection() as conn:
+            execute_query(conn, '''
+                UPDATE users 
+                SET subscription_status = 'past_due', updated_at = CURRENT_TIMESTAMP
+                WHERE stripe_customer_id = ?
+            ''', (customer_id,))
+            print(f"handle_payment_failed: Updated user status to 'past_due' for customer {customer_id}")
             
-            const allowedTypes = ['audio/wav', 'audio/mpeg', 'audio/mp3', 'audio/aac', 'audio/mp4', 'audio/x-m4a', 'audio/flac', 'audio/ogg'];
-            const maxSize = 100 * 1024 * 1024; // 100MB
+    except Exception as e:
+        print(f"Error in handle_payment_failed: {e}")
+        raise
 
-            if (!allowedTypes.some(type => file.type.startsWith('audio/')) && !file.name.match(/\.(wav|mp3|aac|m4a|flac|ogg)$/i)) {
-                showError('Please select a valid audio file (WAV, MP3, AAC, M4A, FLAC, OGG)');
-                return;
-            }
+# Protected transcription routes
+@app.route('/upload', methods=['POST'])
+@subscription_required
+def upload_file():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No file selected"}), 400
+    
+    if not allowed_file(file.filename):
+        return jsonify({"error": f"File type not supported. Allowed types: {', '.join(ALLOWED_EXTENSIONS)}"}), 400
+    
+    try:
+        filename = secure_filename(file.filename)
+        unique_filename = f"{uuid.uuid4().hex}_{filename}"
+        file_path = os.path.join(UPLOAD_FOLDER, unique_filename)
+        file.save(file_path)
+        
+        wav_path = file_path
+        if not filename.lower().endswith('.wav'):
+            wav_path = os.path.join(UPLOAD_FOLDER, f"{unique_filename}.wav")
+            if not convert_to_wav(file_path, wav_path):
+                os.remove(file_path)
+                return jsonify({"error": "Failed to convert audio file to WAV."}), 500
+        
+        result = transcribe_audio(wav_path)
+        
+        # Clean up files
+        try:
+            os.remove(file_path)
+            if wav_path != file_path:
+                os.remove(wav_path)
+        except Exception:
+            pass
+        
+        if "error" in result:
+            return jsonify(result), 500
+        
+        # Save transcription to database
+        user_db = session['user_db']
+        with get_db_connection() as conn:
+            execute_query(conn, '''
+                INSERT INTO transcriptions (user_id, filename, transcript, word_count, confidence)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (user_db['id'], filename, result['transcript'], result['word_count'], result['confidence']))
+        
+        return jsonify({
+            "success": True,
+            "transcript": result["transcript"],
+            "confidence": result["confidence"],
+            "word_count": result["word_count"],
+            "filename": filename,
+            "user": session['user']['name']
+        })
+    
+    except Exception as e:
+        print(f"Upload failed: {e}")
+        return jsonify({"error": f"Processing failed: {str(e)}"}), 500
 
-            if (file.size > maxSize) {
-                showError('File size must be less than 100MB');
-                return;
-            }
+@app.route('/download', methods=['POST'])
+@subscription_required
+def download_transcript():
+    data = request.get_json()
+    if not data or 'transcript' not in data:
+        return jsonify({"error": "No transcript provided"}), 400
+    
+    try:
+        transcript = data['transcript']
+        filename = data.get('filename', 'transcript')
+        
+        if '.' in filename:
+            filename = filename.rsplit('.', 1)[0]
+        
+        docx_path = create_docx(transcript, filename)
+        
+        return send_file(
+            docx_path,
+            as_attachment=True,
+            download_name=f"{filename}_transcript.docx",
+            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        )
+    
+    except Exception as e:
+        return jsonify({"error": f"Document creation failed: {str(e)}"}), 500
 
-            selectedFile = file;
-            currentFilename = file.name;
-            
-            // Show file info
-            fileInfo.innerHTML = `
-                <div class="file-info">
-                    <i class="fas fa-file-audio me-2"></i>
-                    <strong>${file.name}</strong><br>
-                    <small>Size: ${(file.size / (1024 * 1024)).toFixed(2)} MB</small>
-                </div>
-            `;
-            fileInfo.style.display = 'block';
-            uploadBtn.style.display = 'block';
-            hideError();
-        }
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({
+        "status": "healthy",
+        "database_type": "PostgreSQL" if (DATABASE_URL.startswith('postgresql://') and POSTGRES_AVAILABLE) else "SQLite",
+        "azure_speech_initialized": speech_config is not None,
+        "google_oauth_configured": client_config is not None,
+        "stripe_configured": stripe.api_key is not None,
+        "authenticated_session_active": 'user' in session,
+        "timestamp": datetime.now().isoformat()
+    })
 
-        async function uploadFile() {
-            if (!selectedFile) return;
-            
-            if (!isAuthenticated) {
-                showError('Please log in to upload files');
-                return;
-            }
-            
-            if (!subscriptionActive) {
-                subscriptionModal.show();
-                return;
-            }
+# Initialize database on startup
+init_db()
 
-            const formData = new FormData();
-            formData.append('file', selectedFile);
-
-            uploadBtn.disabled = true;
-            showProgress();
-            
-            try {
-                const response = await fetch(`${API_BASE}/upload`, {
-                    method: 'POST',
-                    body: formData,
-                    credentials: 'include'
-                });
-
-                const result = await response.json();
-
-                if (!response.ok) {
-                    if (response.status === 401) {
-                        showError('Session expired. Please log in again.');
-                        showLoginSection();
-                        return;
-                    } else if (response.status === 402) {
-                        // Payment required - subscription inactive
-                        await checkSubscriptionStatus();
-                        showError('Active subscription required. Please subscribe or check your subscription status.');
-                        return;
-                    }
-                    throw new Error(result.error || 'Upload failed');
-                }
-
-                currentTranscript = result.transcript;
-                showResults(result);
-                
-            } catch (error) {
-                showError(`Error: ${error.message}`);
-            } finally {
-                hideProgress();
-                uploadBtn.disabled = false;
-            }
-        }
-
-        function showProgress() {
-            progressContainer.style.display = 'block';
-            loadingSpinner.style.display = 'block';
-            resultsSection.style.display = 'none';
-            
-            // Simulate progress
-            let progress = 0;
-            const interval = setInterval(() => {
-                progress += Math.random() * 15;
-                if (progress > 90) progress = 90;
-                progressBar.style.width = `${progress}%`;
-            }, 500);
-            
-            // Store interval ID to clear it later
-            window.progressInterval = interval;
-        }
-
-        function hideProgress() {
-            if (window.progressInterval) {
-                clearInterval(window.progressInterval);
-            }
-            progressContainer.style.display = 'none';
-            loadingSpinner.style.display = 'none';
-            progressBar.style.width = '0%';
-        }
-
-        function showResults(result) {
-            transcript.textContent = result.transcript;
-            wordCount.textContent = result.word_count;
-            confidence.textContent = `${Math.round(result.confidence * 100)}%`;
-            
-            resultsSection.style.display = 'block';
-            resultsSection.scrollIntoView({ behavior: 'smooth' });
-        }
-
-        function showError(message) {
-            errorMessage.innerHTML = `
-                <div class="error-message">
-                    <i class="fas fa-exclamation-triangle me-2"></i>
-                    ${message}
-                </div>
-            `;
-            errorMessage.style.display = 'block';
-        }
-
-        function hideError() {
-            errorMessage.style.display = 'none';
-        }
-
-        async function copyTranscript() {
-            try {
-                await navigator.clipboard.writeText(currentTranscript);
-                copyBtn.innerHTML = '<i class="fas fa-check me-2"></i>Copied!';
-                copyBtn.classList.remove('btn-outline-primary');
-                copyBtn.classList.add('btn-success');
-                
-                setTimeout(() => {
-                    copyBtn.innerHTML = '<i class="fas fa-copy me-2"></i>Copy Text';
-                    copyBtn.classList.remove('btn-success');
-                    copyBtn.classList.add('btn-outline-primary');
-                }, 2000);
-            } catch (error) {
-                showError('Failed to copy text to clipboard');
-            }
-        }
-
-        async function downloadDocument() {
-            if (!isAuthenticated) {
-                showError('Please log in to download files');
-                return;
-            }
-            
-            if (!subscriptionActive) {
-                subscriptionModal.show();
-                return;
-            }
-            
-            try {
-                downloadBtn.disabled = true;
-                downloadBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Generating...';
-                
-                const response = await fetch(`${API_BASE}/download`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    credentials: 'include',
-                    body: JSON.stringify({
-                        transcript: currentTranscript,
-                        filename: currentFilename
-                    })
-                });
-
-                if (!response.ok) {
-                    if (response.status === 401) {
-                        showError('Session expired. Please log in again.');
-                        showLoginSection();
-                        return;
-                    } else if (response.status === 402) {
-                        // Payment required - subscription inactive
-                        await checkSubscriptionStatus();
-                        showError('Active subscription required. Please subscribe or check your subscription status.');
-                        return;
-                    }
-                    const error = await response.json();
-                    throw new Error(error.error || 'Download failed');
-                }
-
-                const blob = await response.blob();
-                const url = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `${currentFilename.split('.')[0]}_transcript.docx`;
-                document.body.appendChild(a);
-                a.click();
-                window.URL.revokeObjectURL(url);
-                document.body.removeChild(a);
-                
-            } catch (error) {
-                showError(`Download failed: ${error.message}`);
-            } finally {
-                downloadBtn.disabled = false;
-                downloadBtn.innerHTML = '<i class="fas fa-download me-2"></i>Download as Word Doc';
-            }
-        }
-
-        function showSuccess(message) {
-            errorMessage.innerHTML = `
-                <div class="alert alert-success" role="alert">
-                    <i class="fas fa-check-circle me-2"></i>
-                    ${message}
-                </div>
-            `;
-            errorMessage.style.display = 'block';
-        }
-
-        // Check backend health and auth status on page load
-        window.addEventListener('load', async () => {
-            // Handle URL parameters first (for auth callback and subscription)
-            const urlParams = new URLSearchParams(window.location.search);
-            
-            if (urlParams.get('auth') === 'success') {
-                // Remove the parameter from URL
-                window.history.replaceState({}, document.title, window.location.pathname);
-                showSuccess('Successfully logged in!');
-                setTimeout(() => hideError(), 3000);
-            } else if (urlParams.get('auth') === 'error') {
-                showError('Authentication failed. Please try again.');
-                window.history.replaceState({}, document.title, window.location.pathname);
-            }
-            
-            // Handle subscription callback
-            if (urlParams.get('subscription') === 'success') {
-                window.history.replaceState({}, document.title, window.location.pathname);
-                showSuccess('Subscription activated successfully! You can now use all premium features.');
-                setTimeout(() => hideError(), 5000);
-            } else if (urlParams.get('subscription') === 'cancelled') {
-                window.history.replaceState({}, document.title, window.location.pathname);
-                showError('Subscription was cancelled. You can try again anytime.');
-                setTimeout(() => hideError(), 5000);
-            }
-            
-            // Check authentication status
-            await checkAuthStatus();
-            
-            // Check backend health
-            try {
-                const response = await fetch(`${API_BASE}/health`, {
-                    credentials: 'include'
-                });
-                const health = await response.json();
-                
-                if (!health.azure_speech_initialized) {
-                    showError('Azure Speech-to-Text API is not configured. Please check the server configuration.');
-                }
-                
-                if (!health.google_oauth_configured) {
-                    showError('Google OAuth is not configured. Please check the server configuration.');
-                }
-                
-                if (!health.stripe_configured) {
-                    console.warn('Stripe is not configured - subscription features may not work');
-                }
-            } catch (error) {
-                showError('Cannot connect to the backend server. Please ensure it is running.');
-            }
-        });
-
-        // Periodically check subscription status while user is active
-        setInterval(async () => {
-            if (isAuthenticated) {
-                await checkSubscriptionStatus();
-            }
-        }, 5 * 60 * 1000); // Check every 5 minutes
-    </script>
-</body>
-</html>
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=5000)
