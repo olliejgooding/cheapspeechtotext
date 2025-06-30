@@ -14,7 +14,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read #This is required for actions/checkout
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
@@ -28,29 +28,68 @@ jobs:
         run: |
           python -m venv venv
           source venv/bin/activate
-      
+
       - name: Install dependencies
-        run: pip install -r requirements.txt
-        
-      # Optional: Add step to run tests here (PyTest, Django test suites, etc.)
+        run: |
+          source venv/bin/activate
+          pip install -r requirements.txt
+
+      # Create the deployment package with all necessary files
+      - name: Create deployment package
+        run: |
+          # Create a clean deployment directory
+          mkdir deployment
+          
+          # Copy application files
+          cp app.py deployment/
+          cp requirements.txt deployment/
+          cp index.html deployment/
+          
+          # Create startup.sh
+          cat > deployment/startup.sh << 'EOF'
+          #!/bin/bash
+          echo "Starting Azure App Service startup script..."
+          apt-get update && apt-get install -y ffmpeg
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -c "
+          try:
+              from app import init_db
+              init_db()
+              print('Database initialized successfully')
+          except Exception as e:
+              print(f'Database initialization error: {e}')
+          "
+          exec gunicorn --bind=0.0.0.0:8000 --timeout 600 --workers=2 --worker-class=sync app:app
+          EOF
+          
+          # Make startup.sh executable
+          chmod +x deployment/startup.sh
+          
+          # Create .deployment file for Azure
+          cat > deployment/.deployment << 'EOF'
+          [config]
+          SCM_DO_BUILD_DURING_DEPLOYMENT=1
+          EOF
 
       - name: Zip artifact for deployment
-        run: zip release.zip ./* -r
+        run: |
+          cd deployment
+          zip -r ../release.zip . -x "*.pyc" "__pycache__/*"
+          cd ..
 
       - name: Upload artifact for deployment jobs
         uses: actions/upload-artifact@v4
         with:
           name: python-app
-          path: |
-            release.zip
-            !venv/
+          path: release.zip
 
   deploy:
     runs-on: ubuntu-latest
     needs: build
     permissions:
-      id-token: write #This is required for requesting the JWT
-      contents: read #This is required for actions/checkout
+      id-token: write
+      contents: read
 
     steps:
       - name: Download artifact from build job
@@ -61,7 +100,6 @@ jobs:
       - name: Unzip artifact for deployment
         run: unzip release.zip
 
-      
       - name: Login to Azure
         uses: azure/login@v2
         with:
@@ -75,4 +113,4 @@ jobs:
         with:
           app-name: 'transcription-app-OG-2025'
           slot-name: 'Production'
-          
+          package: '.'
