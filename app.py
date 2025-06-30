@@ -325,6 +325,33 @@ def api_status():
         **user_status
     })
 
+@app.route('/debug/user-info')
+@login_required
+def debug_user_info():
+    user_db = session['user_db']
+    
+    # Get detailed user info from database
+    with get_db_connection() as conn:
+        user = conn.execute(
+            'SELECT * FROM users WHERE id = ?',
+            (user_db['id'],)
+        ).fetchone()
+        
+        if user:
+            user_dict = dict(user)
+            # Don't expose sensitive data in debug
+            return jsonify({
+                "user_id": user_dict['id'],
+                "email": user_dict['email'],
+                "stripe_customer_id": user_dict['stripe_customer_id'],
+                "subscription_status": user_dict['subscription_status'],
+                "subscription_id": user_dict['subscription_id'],
+                "subscription_end_date": user_dict['subscription_end_date'],
+                "created_at": user_dict['created_at'],
+                "updated_at": user_dict['updated_at']
+            })
+        else:
+            return jsonify({"error": "User not found in database"})
 # Authentication routes (modified to include database user creation)
 @app.route('/auth/login')
 def login():
