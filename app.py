@@ -231,7 +231,7 @@ def get_or_create_user(google_user_info):
 def update_user_subscription(user_id, stripe_customer_id, subscription_status, subscription_id=None, end_date=None):
     """Update user subscription information and refresh session."""
     with get_db_connection() as conn:
-        # Ensure end_date is a datetime object if not None, for consistent database storage
+        # Ensure end_date is a datetime object if not None
         if isinstance(end_date, str):
             try:
                 end_date = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
@@ -246,12 +246,19 @@ def update_user_subscription(user_id, stripe_customer_id, subscription_status, s
             WHERE id = ?
         ''', (stripe_customer_id, subscription_status, subscription_id, end_date, user_id))
 
-        # IMPORTANT: After updating the DB, re-fetch the user_db to ensure session is fresh
-        updated_user = execute_query(conn, 'SELECT * FROM users WHERE id = ?', (user_id,), fetch='one')
-        if updated_user:
-            session['user_db'] = dict(updated_user)
-            print(f"DEBUG: Session user_db refreshed after update. New stripe_customer_id: {session['user_db']['stripe_customer_id']}")
+        print(f"update_user_subscription: Updated user {user_id} - customer_id: {stripe_customer_id}, status: {subscription_status}, sub_id: {subscription_id}, end_date: {end_date}")
 
+        # Update session if this user is currently logged in
+        try:
+            if 'user_db' in session and session['user_db']['id'] == user_id:
+                # Re-fetch the user to ensure session is fresh
+                updated_user = execute_query(conn, 'SELECT * FROM users WHERE id = ?', (user_id,), fetch='one')
+                if updated_user:
+                    session['user_db'] = dict(updated_user)
+                    print(f"update_user_subscription: Session refreshed for user {user_id}")
+        except Exception as e:
+            print(f"update_user_subscription: Could not update session: {e}")
+            # This is expected in webhook context where there's no session
 
 def is_subscription_active(user_id):
     """Check if user has an active subscription."""
@@ -276,6 +283,160 @@ def is_subscription_active(user_id):
             return True # If no end_date, assume perpetual active (unlikely for subscriptions but defensively coded)
             
         return False
+
+# Stripe webhook handlers
+def handle_subscription_created(subscription):
+    """Handle subscription created/updated events."""
+    try:
+        customer_id = subscription['customer']
+        subscription_id = subscription['id']
+        status = subscription['status']
+        
+        print(f"handle_subscription_created: Processing subscription {subscription_id} for customer {customer_id} with status {status}")
+        
+        with get_db_connection() as conn:
+            user = execute_query(conn,
+                'SELECT id FROM users WHERE stripe_customer_id = ?',
+                (customer_id,),
+                fetch='one'
+            )
+            
+            if user:
+                user_id = user['id']
+                # Convert Unix timestamp to datetime object
+                end_date = datetime.fromtimestamp(subscription['current_period_end'])
+                
+                print(f"handle_subscription_created: Found user {user_id}. Updating subscription to status='{status}', id='{subscription_id}', end_date='{end_date}'")
+                
+                # Update user subscription
+                update_user_subscription(user_id, customer_id, status, subscription_id, end_date)
+                
+                print(f"handle_subscription_created: Successfully updated subscription for user {user_id}")
+            else:
+                print(f"handle_subscription_created: No user found in DB for Stripe customer ID: {customer_id}")
+                # Try to find user by email from Stripe customer
+                try:
+                    stripe_customer = stripe.Customer.retrieve(customer_id)
+                    if stripe_customer.email:
+                        user_by_email = execute_query(conn,
+                            'SELECT id FROM users WHERE email = ?',
+                            (stripe_customer.email,),
+                            fetch='one'
+                        )
+                        if user_by_email:
+                            user_id = user_by_email['id']
+                            end_date = datetime.fromtimestamp(subscription['current_period_end'])
+                            update_user_subscription(user_id, customer_id, status, subscription_id, end_date)
+                            print(f"handle_subscription_created: Linked subscription to existing user {user_id} by email")
+                        else:
+                            print(f"handle_subscription_created: No user found with email {stripe_customer.email}")
+                    else:
+                        print(f"handle_subscription_created: Stripe customer {customer_id} has no email")
+                except Exception as e:
+                    print(f"handle_subscription_created: Error retrieving Stripe customer {customer_id}: {e}")
+                
+    except Exception as e:
+        print(f"Error in handle_subscription_created for subscription {subscription.get('id', 'N/A')}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+def handle_subscription_updated(subscription):
+    """Handle subscription updated events."""
+    print(f"handle_subscription_updated: Processing subscription update for {subscription.get('id', 'N/A')}")
+    handle_subscription_created(subscription)  # Same logic as creation
+
+def handle_subscription_deleted(subscription):
+    """Handle subscription deleted/cancelled events."""
+    try:
+        customer_id = subscription['customer']
+        subscription_id = subscription['id']
+        
+        print(f"handle_subscription_deleted: Processing subscription deletion for customer {customer_id}, subscription {subscription_id}")
+        
+        with get_db_connection() as conn:
+            user = execute_query(conn, 
+                'SELECT id, subscription_id FROM users WHERE stripe_customer_id = ?', 
+                (customer_id,), 
+                fetch='one'
+            )
+            if user:
+                # Only update if this is the current subscription
+                if user.get('subscription_id') == subscription_id or not user.get('subscription_id'):
+                    update_user_subscription(user['id'], customer_id, 'canceled', None, None)
+                    print(f"handle_subscription_deleted: Canceled subscription for customer {customer_id}")
+                else:
+                    print(f"handle_subscription_deleted: Subscription {subscription_id} does not match current user subscription {user.get('subscription_id')}")
+            else:
+                print(f"handle_subscription_deleted: No user found for customer {customer_id}")
+            
+    except Exception as e:
+        print(f"Error in handle_subscription_deleted: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+def handle_payment_succeeded(invoice):
+    """Handle successful payment events."""
+    try:
+        if invoice.get('subscription'):
+            # Payment for a subscription
+            subscription_id = invoice['subscription']
+            print(f"handle_payment_succeeded: Payment succeeded for subscription {subscription_id}")
+            
+            # Fetch the subscription to get updated info
+            subscription = stripe.Subscription.retrieve(subscription_id)
+            handle_subscription_created(subscription)
+        else:
+            print(f"handle_payment_succeeded: Payment succeeded for non-subscription invoice {invoice.get('id', 'N/A')}")
+            
+    except Exception as e:
+        print(f"Error in handle_payment_succeeded: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+def handle_payment_failed(invoice):
+    """Handle failed payment events."""
+    try:
+        customer_id = invoice['customer']
+        
+        print(f"handle_payment_failed: Payment failed for customer {customer_id}")
+        
+        with get_db_connection() as conn:
+            user = execute_query(conn, 
+                'SELECT id, subscription_status FROM users WHERE stripe_customer_id = ?', 
+                (customer_id,), 
+                fetch='one'
+            )
+            if user:
+                # Update status to past_due but keep other subscription info
+                current_status = user.get('subscription_status', 'inactive')
+                if current_status == 'active':
+                    execute_query(conn, '''
+                        UPDATE users 
+                        SET subscription_status = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    ''', ('past_due', user['id']))
+                    
+                    # Update session if this user is currently logged in
+                    try:
+                        if 'user_db' in session and session['user_db']['id'] == user['id']:
+                            session['user_db']['subscription_status'] = 'past_due'
+                    except:
+                        pass  # Session might not be available in webhook context
+                    
+                    print(f"handle_payment_failed: Updated user {user['id']} status to 'past_due'")
+                else:
+                    print(f"handle_payment_failed: User {user['id']} already has status '{current_status}', not updating")
+            else:
+                print(f"handle_payment_failed: No user found for customer {customer_id}")
+            
+    except Exception as e:
+        print(f"Error in handle_payment_failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 # OAuth and Google setup
 client_config = None
@@ -313,159 +474,19 @@ def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if 'user' not in session:
-            return jsonify({"error": "Authentication required", "redirect": "/auth/login"}), 401
-        return f(*args, **kwargs)
-    return decorated_function
-
-def subscription_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'user' not in session:
-            return jsonify({"error": "Authentication required", "redirect": "/auth/login"}), 401
-        
-        if not is_subscription_active(session['user_db']['id']):
             return jsonify({
-                "error": "Active subscription required", 
-                "redirect": "/subscription",
-                "subscription_status": "inactive"
-            }), 402  # Payment Required
-        return f(*args, **kwargs)
-    return decorated_function
-
-# Helper functions
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
-def convert_to_wav(input_path, output_path):
-    try:
-        audio = AudioSegment.from_file(input_path)
-        audio = audio.set_channels(1).set_frame_rate(16000).set_sample_width(2)
-        audio.export(output_path, format="wav")
-    except Exception as e:
-        print(f"Audio conversion error: {e}")
-        return False
-    return True
-
-def transcribe_audio(audio_path):
-    if not speech_config:
-        return {"error": "Azure Speech client not initialized."}
-    
-    try:
-        audio_config = speechsdk.audio.AudioConfig(filename=audio_path)
-        speech_recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
-        
-        done = False
-        results = []
-        
-        def stop_cb(evt):
-            nonlocal done
-            done = True
-        
-        def recognized_cb(evt):
-            if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
-                results.append({
-                    'text': evt.result.text,
-                    'confidence': evt.result.properties.get(speechsdk.PropertyId.SpeechServiceResponse_JsonResult, '{}')
-                })
-        
-        speech_recognizer.recognized.connect(recognized_cb)
-        speech_recognizer.session_stopped.connect(stop_cb)
-        speech_recognizer.canceled.connect(stop_cb)
-        
-        speech_recognizer.start_continuous_recognition()
-        
-        import time
-        timeout = 300
-        start_time = time.time()
-        
-        while not done and (time.time() - start_time) < timeout:
-            time.sleep(0.5)
-        
-        speech_recognizer.stop_continuous_recognition()
-        
-        if not results:
-            return {"error": "No speech recognized in the audio file."}
-        
-        full_transcript = " ".join([result['text'] for result in results])
-        word_count = len(full_transcript.split()) if full_transcript else 0
-        
-        return {
-            "transcript": full_transcript,
-            "confidence": 0.85,
-            "word_count": word_count
-        }
+            "user_id": user_dict['id'],
+            "email": user_dict['email'],
+            "stripe_customer_id": user_dict.get('stripe_customer_id'),
+            "subscription_status": user_dict.get('subscription_status'),
+            "subscription_id": user_dict.get('subscription_id'),
+            "subscription_end_date": str(user_dict.get('subscription_end_date')) if user_dict.get('subscription_end_date') else None,
+            "subscription_active_calculated": subscription_active,
+            "stripe_info": stripe_info
+        })
         
     except Exception as e:
-        return {"error": f"Transcription failed: {str(e)}"}
-
-def create_docx(transcript, filename="transcript"):
-    doc = Document()
-    header = doc.sections[0].header
-    header_para = header.paragraphs[0]
-    header_para.text = f"Audio Transcript - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    
-    title = doc.add_heading('Audio Transcription', 0)
-    doc.add_paragraph(transcript)
-    
-    footer = doc.sections[0].footer
-    footer_para = footer.paragraphs[0]
-    footer_para.text = f"Word count: {len(transcript.split())} words"
-    
-    temp_path = os.path.join(tempfile.gettempdir(), f"{filename}_{uuid.uuid4().hex}.docx")
-    doc.save(temp_path)
-    return temp_path
-
-# Routes
-@app.route('/')
-def index():
-    return send_file('index.html')
-
-@app.route('/api/status')
-def api_status():
-    user_status = {}
-    if 'user' in session and 'user_db' in session:
-        user_status = {
-            "authenticated": True,
-            "user": session['user']['name'],
-            "subscription_active": is_subscription_active(session['user_db']['id']),
-            "subscription_status": session['user_db']['subscription_status']
-        }
-    else:
-        user_status = {"authenticated": False}
-    
-    return jsonify({
-        "message": "Speech-to-Text API is running",
-        **user_status
-    })
-
-@app.route('/debug/user-info')
-@login_required
-def debug_user_info():
-    user_db = session['user_db']
-    
-    # Get detailed user info from database
-    with get_db_connection() as conn:
-        user = execute_query(conn,
-            'SELECT * FROM users WHERE id = ?',
-            (user_db['id'],),
-            fetch='one'
-        )
-        
-        if user:
-            user_dict = dict(user)
-            # Don't expose sensitive data in debug
-            return jsonify({
-                "user_id": user_dict['id'],
-                "email": user_dict['email'],
-                "stripe_customer_id": user_dict['stripe_customer_id'],
-                "subscription_status": user_dict['subscription_status'],
-                "subscription_id": user_dict['subscription_id'],
-                "subscription_end_date": str(user_dict['subscription_end_date']) if user_dict['subscription_end_date'] else None,
-                "created_at": str(user_dict['created_at']),
-                "updated_at": str(user_dict['updated_at'])
-            })
-        else:
-            return jsonify({"error": "User not found in database"})
+        return jsonify({"error": str(e)}), 500
 
 # Authentication routes
 @app.route('/auth/login')
@@ -647,101 +668,6 @@ def create_checkout_session():
         traceback.print_exc() # Print full traceback for debugging
         return jsonify({'error': str(e)}), 500
 
-def handle_subscription_created(subscription):
-    try:
-        customer_id = subscription['customer']
-        subscription_id = subscription['id']
-        status = subscription['status']
-        
-        print(f"handle_subscription_created: Processing subscription {subscription_id} for customer {customer_id} with status {status}")
-        
-        with get_db_connection() as conn:
-            user = execute_query(conn,
-                'SELECT id FROM users WHERE stripe_customer_id = ?',
-                (customer_id,),
-                fetch='one'
-            )
-            
-            if user:
-                user_id = user['id']
-                # Convert Unix timestamp to datetime object
-                # Stripe's current_period_end is a Unix timestamp (integer)
-                end_date = datetime.fromtimestamp(subscription['current_period_end'])
-                
-                print(f"handle_subscription_created: Found user {user_id}. Updating subscription to status='{status}', id='{subscription_id}', end_date='{end_date}'")
-                
-                # Call update_user_subscription, which now also refreshes the session
-                update_user_subscription(user_id, customer_id, status, subscription_id, end_date)
-                
-                print(f"handle_subscription_created: Successfully updated subscription for user {user_id}")
-            else:
-                print(f"handle_subscription_created: No user found in DB for Stripe customer ID: {customer_id}. This subscription will not be recorded.")
-                # You might want to add logic here to create a user or link to an existing one by email
-                # if this scenario is expected (e.g., customer created in Stripe first).
-                
-    except Exception as e:
-        print(f"Error in handle_subscription_created for subscription {subscription.get('id', 'N/A')}: {e}")
-        import traceback
-        traceback.print_exc()
-        raise # Re-raise to ensure the 500 is sent back to Stripe for visibility.
-
-def handle_subscription_updated(subscription):
-    # Same logic as created, but adding a specific print for clarity
-    print(f"handle_subscription_updated: Processing subscription update for {subscription.get('id', 'N/A')}")
-    handle_subscription_created(subscription)
-
-def handle_subscription_deleted(subscription):
-    try:
-        customer_id = subscription['customer']
-        
-        print(f"handle_subscription_deleted: Processing subscription deletion for customer {customer_id}")
-        
-        with get_db_connection() as conn:
-            user = execute_query(conn, 'SELECT id FROM users WHERE stripe_customer_id = ?', (customer_id,), fetch='one')
-            if user:
-                # Call update_user_subscription, which now also refreshes the session
-                update_user_subscription(user['id'], customer_id, 'canceled', None, None)
-                print(f"handle_subscription_deleted: Canceled subscription for customer {customer_id}")
-            else:
-                print(f"handle_subscription_deleted: No user found for customer {customer_id} to cancel subscription.")
-            
-    except Exception as e:
-        print(f"Error in handle_subscription_deleted: {e}")
-        raise
-
-def handle_payment_succeeded(invoice):
-    try:
-        if invoice.get('subscription'):
-            # Fetch the subscription to get updated info
-            subscription = stripe.Subscription.retrieve(invoice['subscription'])
-            print(f"handle_payment_succeeded: Payment succeeded for subscription {invoice['subscription']}. Calling handle_subscription_created.")
-            handle_subscription_created(subscription)
-        else:
-            print(f"handle_payment_succeeded: Payment succeeded for non-subscription invoice {invoice.get('id', 'N/A')}")
-            
-    except Exception as e:
-        print(f"Error in handle_payment_succeeded: {e}")
-        raise
-
-def handle_payment_failed(invoice):
-    try:
-        customer_id = invoice['customer']
-        
-        print(f"handle_payment_failed: Payment failed for customer {customer_id}")
-        
-        with get_db_connection() as conn:
-            user = execute_query(conn, 'SELECT id FROM users WHERE stripe_customer_id = ?', (customer_id,), fetch='one')
-            if user:
-                # Call update_user_subscription, which now also refreshes the session
-                update_user_subscription(user['id'], customer_id, 'past_due', user.get('subscription_id'), user.get('subscription_end_date'))
-                print(f"handle_payment_failed: Updated user status to 'past_due' for customer {customer_id}")
-            else:
-                print(f"handle_payment_failed: No user found for customer {customer_id} to update payment status.")
-            
-    except Exception as e:
-        print(f"Error in handle_payment_failed: {e}")
-        raise
-
 # Protected transcription routes
 @app.route('/upload', methods=['POST'])
 @subscription_required
@@ -857,4 +783,300 @@ if __name__ == '__main__':
 else:
     # This block is for production deployment (e.g., with Gunicorn)
     # The 'app' object is expected to be imported by a WSGI server
-    print("Flask app loaded for production deployment.")
+    print("Flask app loaded for production deployment.")"error": "Authentication required", "redirect": "/auth/login"}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+def subscription_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user' not in session:
+            return jsonify({"error": "Authentication required", "redirect": "/auth/login"}), 401
+        
+        if not is_subscription_active(session['user_db']['id']):
+            return jsonify({
+                "error": "Active subscription required", 
+                "redirect": "/subscription",
+                "subscription_status": "inactive"
+            }), 402  # Payment Required
+        return f(*args, **kwargs)
+    return decorated_function
+
+# Helper functions
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def convert_to_wav(input_path, output_path):
+    try:
+        audio = AudioSegment.from_file(input_path)
+        audio = audio.set_channels(1).set_frame_rate(16000).set_sample_width(2)
+        audio.export(output_path, format="wav")
+    except Exception as e:
+        print(f"Audio conversion error: {e}")
+        return False
+    return True
+
+def transcribe_audio(audio_path):
+    if not speech_config:
+        return {"error": "Azure Speech client not initialized."}
+    
+    try:
+        audio_config = speechsdk.audio.AudioConfig(filename=audio_path)
+        speech_recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
+        
+        done = False
+        results = []
+        
+        def stop_cb(evt):
+            nonlocal done
+            done = True
+        
+        def recognized_cb(evt):
+            if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                results.append({
+                    'text': evt.result.text,
+                    'confidence': evt.result.properties.get(speechsdk.PropertyId.SpeechServiceResponse_JsonResult, '{}')
+                })
+        
+        speech_recognizer.recognized.connect(recognized_cb)
+        speech_recognizer.session_stopped.connect(stop_cb)
+        speech_recognizer.canceled.connect(stop_cb)
+        
+        speech_recognizer.start_continuous_recognition()
+        
+        import time
+        timeout = 300
+        start_time = time.time()
+        
+        while not done and (time.time() - start_time) < timeout:
+            time.sleep(0.5)
+        
+        speech_recognizer.stop_continuous_recognition()
+        
+        if not results:
+            return {"error": "No speech recognized in the audio file."}
+        
+        full_transcript = " ".join([result['text'] for result in results])
+        word_count = len(full_transcript.split()) if full_transcript else 0
+        
+        return {
+            "transcript": full_transcript,
+            "confidence": 0.85,
+            "word_count": word_count
+        }
+        
+    except Exception as e:
+        return {"error": f"Transcription failed: {str(e)}"}
+
+def create_docx(transcript, filename="transcript"):
+    doc = Document()
+    header = doc.sections[0].header
+    header_para = header.paragraphs[0]
+    header_para.text = f"Audio Transcript - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    
+    title = doc.add_heading('Audio Transcription', 0)
+    doc.add_paragraph(transcript)
+    
+    footer = doc.sections[0].footer
+    footer_para = footer.paragraphs[0]
+    footer_para.text = f"Word count: {len(transcript.split())} words"
+    
+    temp_path = os.path.join(tempfile.gettempdir(), f"{filename}_{uuid.uuid4().hex}.docx")
+    doc.save(temp_path)
+    return temp_path
+
+# Routes
+@app.route('/')
+def index():
+    return send_file('index.html')
+
+@app.route('/api/status')
+def api_status():
+    user_status = {}
+    if 'user' in session and 'user_db' in session:
+        user_status = {
+            "authenticated": True,
+            "user": session['user']['name'],
+            "subscription_active": is_subscription_active(session['user_db']['id']),
+            "subscription_status": session['user_db']['subscription_status']
+        }
+    else:
+        user_status = {"authenticated": False}
+    
+    return jsonify({
+        "message": "Speech-to-Text API is running",
+        **user_status
+    })
+
+# Subscription status endpoint
+@app.route('/api/subscription/status')
+@login_required
+def subscription_status():
+    """Get current user's subscription status."""
+    try:
+        user_db = session['user_db']
+        subscription_active = is_subscription_active(user_db['id'])
+        
+        return jsonify({
+            "subscription_active": subscription_active,
+            "subscription_status": user_db.get('subscription_status', 'inactive'),
+            "user_id": user_db['id']
+        })
+    except Exception as e:
+        print(f"Error checking subscription status: {e}")
+        return jsonify({"error": "Failed to check subscription status"}), 500
+
+# Subscription success/cancel pages
+@app.route('/subscription/success')
+def subscription_success():
+    """Handle successful subscription."""
+    return redirect('/?subscription=success')
+
+@app.route('/subscription/cancel') 
+def subscription_cancel():
+    """Handle cancelled subscription."""
+    return redirect('/?subscription=cancelled')
+
+# Customer portal endpoint
+@app.route('/api/subscription/portal', methods=['POST'])
+@login_required
+def create_portal_session():
+    """Create Stripe customer portal session."""
+    try:
+        user_db = session['user_db']
+        
+        if not user_db.get('stripe_customer_id'):
+            return jsonify({"error": "No Stripe customer found"}), 400
+        
+        portal_session = stripe.billing_portal.Session.create(
+            customer=user_db['stripe_customer_id'],
+            return_url=url_for('index', _external=True)
+        )
+        
+        return jsonify({"portal_url": portal_session.url})
+        
+    except Exception as e:
+        print(f"Portal session creation failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# Stripe webhook endpoint
+@app.route('/webhook/stripe', methods=['POST'])
+def stripe_webhook():
+    """Handle Stripe webhook events."""
+    payload = request.get_data()
+    sig_header = request.headers.get('Stripe-Signature')
+    
+    if not STRIPE_WEBHOOK_SECRET:
+        print("Warning: STRIPE_WEBHOOK_SECRET not configured")
+        return jsonify({"error": "Webhook secret not configured"}), 400
+    
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError as e:
+        print(f"Invalid payload: {e}")
+        return jsonify({"error": "Invalid payload"}), 400
+    except stripe.error.SignatureVerificationError as e:
+        print(f"Invalid signature: {e}")
+        return jsonify({"error": "Invalid signature"}), 400
+    
+    # Handle the event
+    try:
+        if event['type'] == 'customer.subscription.created':
+            handle_subscription_created(event['data']['object'])
+        elif event['type'] == 'customer.subscription.updated':
+            handle_subscription_updated(event['data']['object'])
+        elif event['type'] == 'customer.subscription.deleted':
+            handle_subscription_deleted(event['data']['object'])
+        elif event['type'] == 'invoice.payment_succeeded':
+            handle_payment_succeeded(event['data']['object'])
+        elif event['type'] == 'invoice.payment_failed':
+            handle_payment_failed(event['data']['object'])
+        else:
+            print(f"Unhandled event type: {event['type']}")
+        
+        return jsonify({"status": "success"}), 200
+        
+    except Exception as e:
+        print(f"Error handling webhook event {event['type']}: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "Webhook handler failed"}), 500
+
+# Debug endpoints
+@app.route('/debug/user-info')
+@login_required
+def debug_user_info():
+    user_db = session['user_db']
+    
+    # Get detailed user info from database
+    with get_db_connection() as conn:
+        user = execute_query(conn,
+            'SELECT * FROM users WHERE id = ?',
+            (user_db['id'],),
+            fetch='one'
+        )
+        
+        if user:
+            user_dict = dict(user)
+            # Don't expose sensitive data in debug
+            return jsonify({
+                "user_id": user_dict['id'],
+                "email": user_dict['email'],
+                "stripe_customer_id": user_dict['stripe_customer_id'],
+                "subscription_status": user_dict['subscription_status'],
+                "subscription_id": user_dict['subscription_id'],
+                "subscription_end_date": str(user_dict['subscription_end_date']) if user_dict['subscription_end_date'] else None,
+                "created_at": str(user_dict['created_at']),
+                "updated_at": str(user_dict['updated_at'])
+            })
+        else:
+            return jsonify({"error": "User not found in database"})
+
+@app.route('/debug/subscription-info')
+@login_required
+def debug_subscription_info():
+    """Debug endpoint to check subscription information."""
+    user_db = session['user_db']
+    
+    try:
+        # Get user from database
+        with get_db_connection() as conn:
+            user = execute_query(conn,
+                'SELECT * FROM users WHERE id = ?',
+                (user_db['id'],),
+                fetch='one'
+            )
+        
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        
+        user_dict = dict(user)
+        subscription_active = is_subscription_active(user_db['id'])
+        
+        # Try to get Stripe customer info if available
+        stripe_info = None
+        if user_dict.get('stripe_customer_id'):
+            try:
+                stripe_customer = stripe.Customer.retrieve(user_dict['stripe_customer_id'])
+                stripe_info = {
+                    "id": stripe_customer.id,
+                    "email": stripe_customer.email,
+                    "created": stripe_customer.created
+                }
+                
+                # Get subscriptions
+                subscriptions = stripe.Subscription.list(customer=stripe_customer.id)
+                stripe_info["subscriptions"] = [
+                    {
+                        "id": sub.id,
+                        "status": sub.status,
+                        "current_period_end": sub.current_period_end
+                    } for sub in subscriptions.data
+                ]
+                
+            except Exception as e:
+                stripe_info = {"error": str(e)}
+        
+        return jsonify({
