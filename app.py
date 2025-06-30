@@ -231,12 +231,21 @@ def get_or_create_user(google_user_info):
 def update_user_subscription(user_id, stripe_customer_id, subscription_status, subscription_id=None, end_date=None):
     """Update user subscription information."""
     with get_db_connection() as conn:
+        # Ensure end_date is a datetime object if not None, for consistent database storage
+        if isinstance(end_date, str):
+            # This might happen if a string was passed from a previous state or a different source
+            try:
+                end_date = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            except ValueError:
+                print(f"Warning: Could not parse end_date string '{end_date}'. Storing as None.")
+                end_date = None
+        
         execute_query(conn, '''
             UPDATE users 
             SET stripe_customer_id = ?, subscription_status = ?, 
                 subscription_id = ?, subscription_end_date = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
-        ''', (stripe_customer_id, subscription_status, subscription_id, end_date, user_id))
+        ''', (stripe_customer_id, subscription_status, subscription_id, end_date, user_id)) # Pass datetime object directly
 
 def is_subscription_active(user_id):
     """Check if user has an active subscription."""
@@ -258,7 +267,7 @@ def is_subscription_active(user_id):
                 else:
                     end_date = user['subscription_end_date']
                 return datetime.now() < end_date
-            return True
+            return True # If no end_date, assume perpetual active (unlikely for subscriptions but defensively coded)
             
         return False
 
@@ -326,10 +335,10 @@ def convert_to_wav(input_path, output_path):
         audio = AudioSegment.from_file(input_path)
         audio = audio.set_channels(1).set_frame_rate(16000).set_sample_width(2)
         audio.export(output_path, format="wav")
-        return True
     except Exception as e:
         print(f"Audio conversion error: {e}")
         return False
+    return True
 
 def transcribe_audio(audio_path):
     if not speech_config:
@@ -646,9 +655,9 @@ def stripe_webhook():
         else:
             # For testing without webhook secret
             event = json.loads(payload)
-            print("Warning: Processing webhook without signature verification")
+            print("Warning: Processing webhook without signature verification (STRIPE_WEBHOOK_SECRET not set).")
         
-        print(f"Webhook received: {event['type']}")
+        print(f"Webhook received: {event['type']} (Event ID: {event['id']})")
         
     except ValueError as e:
         print(f"Invalid payload: {e}")
@@ -680,7 +689,7 @@ def stripe_webhook():
         return 'Success', 200
         
     except Exception as e:
-        print(f"Webhook processing error: {e}")
+        print(f"Webhook processing error for event {event.get('id', 'N/A')}: {e}")
         import traceback
         traceback.print_exc()
         return 'Webhook processing failed', 500
@@ -691,7 +700,7 @@ def handle_subscription_created(subscription):
         subscription_id = subscription['id']
         status = subscription['status']
         
-        print(f"Processing subscription created: {subscription_id} for customer {customer_id}")
+        print(f"handle_subscription_created: Processing subscription {subscription_id} for customer {customer_id} with status {status}")
         
         with get_db_connection() as conn:
             user = execute_query(conn,
@@ -701,29 +710,41 @@ def handle_subscription_created(subscription):
             )
             
             if user:
+                user_id = user['id']
+                # Convert Unix timestamp to datetime object
+                # Stripe's current_period_end is a Unix timestamp (integer)
                 end_date = datetime.fromtimestamp(subscription['current_period_end'])
+                
+                print(f"handle_subscription_created: Found user {user_id}. Updating subscription to status='{status}', id='{subscription_id}', end_date='{end_date}'")
+                
                 execute_query(conn, '''
                     UPDATE users 
                     SET subscription_status = ?, subscription_id = ?, subscription_end_date = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE stripe_customer_id = ?
-                ''', (status, subscription_id, end_date.isoformat(), customer_id))
-                print(f"Updated subscription for user {user['id']}: status={status}")
+                ''', (status, subscription_id, end_date, customer_id)) # FIX: Pass datetime object directly
+                
+                print(f"handle_subscription_created: Successfully updated subscription for user {user_id}")
             else:
-                print(f"No user found for customer {customer_id}")
+                print(f"handle_subscription_created: No user found in DB for Stripe customer ID: {customer_id}. This subscription will not be recorded.")
+                # You might want to add logic here to create a user or link to an existing one by email
+                # if this scenario is expected (e.g., customer created in Stripe first).
                 
     except Exception as e:
-        print(f"Error in handle_subscription_created: {e}")
+        print(f"Error in handle_subscription_created for subscription {subscription.get('id', 'N/A')}: {e}")
         import traceback
         traceback.print_exc()
-        raise
+        raise # Re-raise to ensure the 500 is sent back to Stripe for visibility.
 
 def handle_subscription_updated(subscription):
-    # Same logic as created
+    # Same logic as created, but adding a specific print for clarity
+    print(f"handle_subscription_updated: Processing subscription update for {subscription.get('id', 'N/A')}")
     handle_subscription_created(subscription)
 
 def handle_subscription_deleted(subscription):
     try:
         customer_id = subscription['customer']
+        
+        print(f"handle_subscription_deleted: Processing subscription deletion for customer {customer_id}")
         
         with get_db_connection() as conn:
             execute_query(conn, '''
@@ -731,7 +752,7 @@ def handle_subscription_deleted(subscription):
                 SET subscription_status = 'canceled', subscription_id = NULL, subscription_end_date = NULL, updated_at = CURRENT_TIMESTAMP
                 WHERE stripe_customer_id = ?
             ''', (customer_id,))
-            print(f"Canceled subscription for customer {customer_id}")
+            print(f"handle_subscription_deleted: Canceled subscription for customer {customer_id}")
             
     except Exception as e:
         print(f"Error in handle_subscription_deleted: {e}")
@@ -742,10 +763,10 @@ def handle_payment_succeeded(invoice):
         if invoice.get('subscription'):
             # Fetch the subscription to get updated info
             subscription = stripe.Subscription.retrieve(invoice['subscription'])
+            print(f"handle_payment_succeeded: Payment succeeded for subscription {invoice['subscription']}. Calling handle_subscription_created.")
             handle_subscription_created(subscription)
-            print(f"Payment succeeded for subscription {invoice['subscription']}")
         else:
-            print("Payment succeeded for non-subscription invoice")
+            print(f"handle_payment_succeeded: Payment succeeded for non-subscription invoice {invoice.get('id', 'N/A')}")
             
     except Exception as e:
         print(f"Error in handle_payment_succeeded: {e}")
@@ -755,13 +776,15 @@ def handle_payment_failed(invoice):
     try:
         customer_id = invoice['customer']
         
+        print(f"handle_payment_failed: Payment failed for customer {customer_id}")
+        
         with get_db_connection() as conn:
             execute_query(conn, '''
                 UPDATE users 
                 SET subscription_status = 'past_due', updated_at = CURRENT_TIMESTAMP
                 WHERE stripe_customer_id = ?
             ''', (customer_id,))
-            print(f"Payment failed for customer {customer_id}")
+            print(f"handle_payment_failed: Updated user status to 'past_due' for customer {customer_id}")
             
     except Exception as e:
         print(f"Error in handle_payment_failed: {e}")
