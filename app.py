@@ -568,20 +568,43 @@ def get_user():
 def create_checkout_session():
     try:
         user_db = session['user_db']
+        customer_id = user_db['stripe_customer_id']
         
-        # Create or get Stripe customer
-        if not user_db['stripe_customer_id']:
+        # If a stripe_customer_id exists, try to retrieve it to verify it's still valid.
+        # If it's not found, treat it as if no customer ID exists for the user.
+        if customer_id:
+            try:
+                stripe.Customer.retrieve(customer_id)
+                print(f"Stripe customer {customer_id} found for user {user_db['id']}.")
+            except stripe.error.InvalidRequestError as e:
+                # This error means the customer ID is invalid or doesn't exist in Stripe
+                print(f"Warning: Stored Stripe customer ID '{customer_id}' for user {user_db['id']} is invalid or not found in Stripe. Error: {e}")
+                
+                # Clear the invalid customer ID from the database and session
+                update_user_subscription(user_db['id'], None, user_db['subscription_status'], user_db.get('subscription_id'), user_db.get('subscription_end_date'))
+                session['user_db']['stripe_customer_id'] = None
+                customer_id = None # Set to None to force creation of a new customer
+            except Exception as e:
+                # Catch any other unexpected errors during retrieval
+                print(f"Unexpected error retrieving Stripe customer {customer_id} for user {user_db['id']}: {e}")
+                # Decide if you want to force new customer creation or re-raise
+                # For now, we'll force new creation for robustness
+                update_user_subscription(user_db['id'], None, user_db['subscription_status'], user_db.get('subscription_id'), user_db.get('subscription_end_date'))
+                session['user_db']['stripe_customer_id'] = None
+                customer_id = None
+
+        # Create or get Stripe customer (this block now handles cases where customer_id was None initially or after verification)
+        if not customer_id:
+            print(f"Creating new Stripe customer for user {user_db['id']} ({session['user']['email']}).")
             customer = stripe.Customer.create(
                 email=session['user']['email'],
                 name=session['user']['name']
             )
             customer_id = customer.id
             
-            # Update user with Stripe customer ID
+            # Update user with newly created Stripe customer ID
             update_user_subscription(user_db['id'], customer_id, user_db['subscription_status'])
             session['user_db']['stripe_customer_id'] = customer_id
-        else:
-            customer_id = user_db['stripe_customer_id']
         
         # Create checkout session
         checkout_session = stripe.checkout.Session.create(
@@ -601,6 +624,8 @@ def create_checkout_session():
         
     except Exception as e:
         print(f"Checkout session creation failed: {e}")
+        import traceback
+        traceback.print_exc() # Print full traceback for debugging
         return jsonify({'error': str(e)}), 500
 
 @app.route('/subscription/success')
@@ -721,7 +746,7 @@ def handle_subscription_created(subscription):
                     UPDATE users 
                     SET subscription_status = ?, subscription_id = ?, subscription_end_date = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE stripe_customer_id = ?
-                ''', (status, subscription_id, end_date, customer_id)) # FIX: Pass datetime object directly
+                ''', (status, subscription_id, end_date, customer_id)) # Pass datetime object directly
                 
                 print(f"handle_subscription_created: Successfully updated subscription for user {user_id}")
             else:
