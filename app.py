@@ -506,6 +506,8 @@ def subscription_status():
         'stripe_customer_id': user_db['stripe_customer_id'] is not None
     })
 
+# Add this to your app.py file - replace the existing webhook handler
+
 # Webhook for Stripe events
 @app.route('/stripe/webhook', methods=['POST'])
 def stripe_webhook():
@@ -513,80 +515,132 @@ def stripe_webhook():
     sig_header = request.headers.get('Stripe-Signature')
     
     try:
-        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
-    except ValueError:
+        # Verify webhook signature
+        if STRIPE_WEBHOOK_SECRET:
+            event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+        else:
+            # For testing without webhook secret
+            event = json.loads(payload)
+            print("Warning: Processing webhook without signature verification")
+        
+        print(f"Webhook received: {event['type']}")
+        
+    except ValueError as e:
+        print(f"Invalid payload: {e}")
         return 'Invalid payload', 400
-    except stripe.error.SignatureVerificationError:
+    except stripe.error.SignatureVerificationError as e:
+        print(f"Invalid signature: {e}")
         return 'Invalid signature', 400
     
-    # Handle subscription events
-    if event['type'] == 'customer.subscription.created':
-        subscription = event['data']['object']
-        handle_subscription_created(subscription)
-    elif event['type'] == 'customer.subscription.updated':
-        subscription = event['data']['object']
-        handle_subscription_updated(subscription)
-    elif event['type'] == 'customer.subscription.deleted':
-        subscription = event['data']['object']
-        handle_subscription_deleted(subscription)
-    elif event['type'] == 'invoice.payment_succeeded':
-        invoice = event['data']['object']
-        handle_payment_succeeded(invoice)
-    elif event['type'] == 'invoice.payment_failed':
-        invoice = event['data']['object']
-        handle_payment_failed(invoice)
-    
-    return 'Success', 200
+    try:
+        # Handle subscription events
+        if event['type'] == 'customer.subscription.created':
+            subscription = event['data']['object']
+            handle_subscription_created(subscription)
+        elif event['type'] == 'customer.subscription.updated':
+            subscription = event['data']['object']
+            handle_subscription_updated(subscription)
+        elif event['type'] == 'customer.subscription.deleted':
+            subscription = event['data']['object']
+            handle_subscription_deleted(subscription)
+        elif event['type'] == 'invoice.payment_succeeded':
+            invoice = event['data']['object']
+            handle_payment_succeeded(invoice)
+        elif event['type'] == 'invoice.payment_failed':
+            invoice = event['data']['object']
+            handle_payment_failed(invoice)
+        else:
+            print(f"Unhandled event type: {event['type']}")
+        
+        return 'Success', 200
+        
+    except Exception as e:
+        print(f"Webhook processing error: {e}")
+        import traceback
+        traceback.print_exc()
+        return 'Webhook processing failed', 500
 
 def handle_subscription_created(subscription):
-    customer_id = subscription['customer']
-    subscription_id = subscription['id']
-    status = subscription['status']
-    
-    with get_db_connection() as conn:
-        user = conn.execute(
-            'SELECT id FROM users WHERE stripe_customer_id = ?',
-            (customer_id,)
-        ).fetchone()
+    try:
+        customer_id = subscription['customer']
+        subscription_id = subscription['id']
+        status = subscription['status']
         
-        if user:
-            end_date = datetime.fromtimestamp(subscription['current_period_end'])
-            update_user_subscription(
-                user['id'], customer_id, status, subscription_id, end_date.isoformat()
-            )
+        print(f"Processing subscription created: {subscription_id} for customer {customer_id}")
+        
+        with get_db_connection() as conn:
+            user = conn.execute(
+                'SELECT id FROM users WHERE stripe_customer_id = ?',
+                (customer_id,)
+            ).fetchone()
+            
+            if user:
+                end_date = datetime.fromtimestamp(subscription['current_period_end'])
+                conn.execute('''
+                    UPDATE users 
+                    SET subscription_status = ?, subscription_id = ?, subscription_end_date = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE stripe_customer_id = ?
+                ''', (status, subscription_id, end_date.isoformat(), customer_id))
+                conn.commit()
+                print(f"Updated subscription for user {user['id']}: status={status}")
+            else:
+                print(f"No user found for customer {customer_id}")
+                
+    except Exception as e:
+        print(f"Error in handle_subscription_created: {e}")
+        raise
 
 def handle_subscription_updated(subscription):
-    handle_subscription_created(subscription)  # Same logic
+    # Same logic as created
+    handle_subscription_created(subscription)
 
 def handle_subscription_deleted(subscription):
-    customer_id = subscription['customer']
-    
-    with get_db_connection() as conn:
-        user = conn.execute(
-            'SELECT id FROM users WHERE stripe_customer_id = ?',
-            (customer_id,)
-        ).fetchone()
+    try:
+        customer_id = subscription['customer']
         
-        if user:
-            update_user_subscription(user['id'], customer_id, 'canceled', None, None)
+        with get_db_connection() as conn:
+            conn.execute('''
+                UPDATE users 
+                SET subscription_status = 'canceled', subscription_id = NULL, subscription_end_date = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE stripe_customer_id = ?
+            ''', (customer_id,))
+            conn.commit()
+            print(f"Canceled subscription for customer {customer_id}")
+            
+    except Exception as e:
+        print(f"Error in handle_subscription_deleted: {e}")
+        raise
 
 def handle_payment_succeeded(invoice):
-    if invoice['subscription']:
-        # Fetch the subscription to get updated info
-        subscription = stripe.Subscription.retrieve(invoice['subscription'])
-        handle_subscription_created(subscription)
+    try:
+        if invoice.get('subscription'):
+            # Fetch the subscription to get updated info
+            subscription = stripe.Subscription.retrieve(invoice['subscription'])
+            handle_subscription_created(subscription)
+            print(f"Payment succeeded for subscription {invoice['subscription']}")
+        else:
+            print("Payment succeeded for non-subscription invoice")
+            
+    except Exception as e:
+        print(f"Error in handle_payment_succeeded: {e}")
+        raise
 
 def handle_payment_failed(invoice):
-    customer_id = invoice['customer']
-    
-    with get_db_connection() as conn:
-        user = conn.execute(
-            'SELECT id FROM users WHERE stripe_customer_id = ?',
-            (customer_id,)
-        ).fetchone()
+    try:
+        customer_id = invoice['customer']
         
-        if user:
-            update_user_subscription(user['id'], customer_id, 'past_due', None, None)
+        with get_db_connection() as conn:
+            conn.execute('''
+                UPDATE users 
+                SET subscription_status = 'past_due', updated_at = CURRENT_TIMESTAMP
+                WHERE stripe_customer_id = ?
+            ''', (customer_id,))
+            conn.commit()
+            print(f"Payment failed for customer {customer_id}")
+            
+    except Exception as e:
+        print(f"Error in handle_payment_failed: {e}")
+        raise
 
 # Protected transcription routes
 @app.route('/upload', methods=['POST'])
