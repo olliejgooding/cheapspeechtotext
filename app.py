@@ -574,6 +574,7 @@ def get_user():
 def create_checkout_session():
     try:
         # Always get the freshest user_db from the session at the start of the function
+        # This ensures we start with the most current data, especially after a login.
         user_db = session['user_db'] 
         current_stripe_customer_id = user_db['stripe_customer_id']
         
@@ -594,13 +595,15 @@ def create_checkout_session():
                 
                 # Clear the invalid ID from the database and session immediately
                 update_user_subscription(user_db['id'], None, user_db['subscription_status'], user_db.get('subscription_id'), user_db.get('subscription_end_date'))
-                # The update_user_subscription function now refreshes session['user_db']
-                # So, user_db in this function will reflect the None after this call.
+                # After updating, explicitly re-read user_db from session to ensure local variable is fresh
+                user_db = session['user_db'] # <--- ADDED/CONFIRMED THIS LINE
                 customer_to_use_id = None # Explicitly set for clarity in this scope
             except Exception as e:
                 # Catch any other unexpected errors during retrieval, also create new customer
                 print(f"DEBUG: Unexpected error retrieving Stripe customer '{current_stripe_customer_id}' for user {user_db['id']}: {e}. Will create a new customer.")
                 update_user_subscription(user_db['id'], None, user_db['subscription_status'], user_db.get('subscription_id'), user_db.get('subscription_end_date'))
+                # After updating, explicitly re-read user_db from session to ensure local variable is fresh
+                user_db = session['user_db'] # <--- ADDED/CONFIRMED THIS LINE
                 customer_to_use_id = None
         else:
             print(f"DEBUG: No Stripe customer ID found in session initially for user {user_db['id']}. Will create a new customer.")
@@ -618,7 +621,8 @@ def create_checkout_session():
             
             # Update user's DB and session with the new customer ID
             update_user_subscription(user_db['id'], customer_to_use_id, user_db['subscription_status'])
-            # The update_user_subscription function now refreshes session['user_db']
+            # After updating, explicitly re-read user_db from session to ensure local variable is fresh
+            user_db = session['user_db'] # <--- ADDED/CONFIRMED THIS LINE
             
         print(f"DEBUG: Final Stripe customer ID for checkout session: '{customer_to_use_id}'")
         # Create checkout session
@@ -693,9 +697,9 @@ def handle_subscription_deleted(subscription):
         print(f"handle_subscription_deleted: Processing subscription deletion for customer {customer_id}")
         
         with get_db_connection() as conn:
-            # Call update_user_subscription, which now also refreshes the session
             user = execute_query(conn, 'SELECT id FROM users WHERE stripe_customer_id = ?', (customer_id,), fetch='one')
             if user:
+                # Call update_user_subscription, which now also refreshes the session
                 update_user_subscription(user['id'], customer_id, 'canceled', None, None)
                 print(f"handle_subscription_deleted: Canceled subscription for customer {customer_id}")
             else:
@@ -728,6 +732,7 @@ def handle_payment_failed(invoice):
         with get_db_connection() as conn:
             user = execute_query(conn, 'SELECT id FROM users WHERE stripe_customer_id = ?', (customer_id,), fetch='one')
             if user:
+                # Call update_user_subscription, which now also refreshes the session
                 update_user_subscription(user['id'], customer_id, 'past_due', user.get('subscription_id'), user.get('subscription_end_date'))
                 print(f"handle_payment_failed: Updated user status to 'past_due' for customer {customer_id}")
             else:
