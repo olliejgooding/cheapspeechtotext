@@ -634,8 +634,8 @@ def create_checkout_session():
                 'quantity': 1,
             }],
             mode='subscription',
-            success_url=url_for('subscription_success', _external=True),
-            cancel_url=url_for('subscription_cancel', _external=True),
+            success_url=url_for('subscription_success', _external=True), # Keep _external=True as Stripe requires absolute URLs
+            cancel_url=url_for('subscription_cancel', _external=True),   # Keep _external=True as Stripe requires absolute URLs
             metadata={'user_id': str(user_db['id'])}
         )
         
@@ -844,5 +844,17 @@ def health_check():
 # Initialize database on startup
 init_db()
 
+# Print the URL map to debug registered routes
+print("\n--- Flask URL Map ---")
+for rule in app.url_map.iter_rules():
+    print(f"Endpoint: {rule.endpoint}, Methods: {rule.methods}, Rule: {rule.rule}")
+print("---------------------\n")
+
 if __name__ == '__main__':
+    # This block is for local development only
+    print("Running Flask app in local development mode...")
     app.run(debug=True, host='0.0.0.0', port=5000)
+else:
+    # This block is for production deployment (e.g., with Gunicorn)
+    # The 'app' object is expected to be imported by a WSGI server
+    print("Flask app loaded for production deployment.")
