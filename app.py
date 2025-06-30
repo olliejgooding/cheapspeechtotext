@@ -229,11 +229,10 @@ def get_or_create_user(google_user_info):
             }
 
 def update_user_subscription(user_id, stripe_customer_id, subscription_status, subscription_id=None, end_date=None):
-    """Update user subscription information."""
+    """Update user subscription information and refresh session."""
     with get_db_connection() as conn:
         # Ensure end_date is a datetime object if not None, for consistent database storage
         if isinstance(end_date, str):
-            # This might happen if a string was passed from a previous state or a different source
             try:
                 end_date = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
             except ValueError:
@@ -245,7 +244,14 @@ def update_user_subscription(user_id, stripe_customer_id, subscription_status, s
             SET stripe_customer_id = ?, subscription_status = ?, 
                 subscription_id = ?, subscription_end_date = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
-        ''', (stripe_customer_id, subscription_status, subscription_id, end_date, user_id)) # Pass datetime object directly
+        ''', (stripe_customer_id, subscription_status, subscription_id, end_date, user_id))
+
+        # IMPORTANT: After updating the DB, re-fetch the user_db to ensure session is fresh
+        updated_user = execute_query(conn, 'SELECT * FROM users WHERE id = ?', (user_id,), fetch='one')
+        if updated_user:
+            session['user_db'] = dict(updated_user)
+            print(f"DEBUG: Session user_db refreshed after update. New stripe_customer_id: {session['user_db']['stripe_customer_id']}")
+
 
 def is_subscription_active(user_id):
     """Check if user has an active subscription."""
@@ -567,48 +573,57 @@ def get_user():
 @login_required
 def create_checkout_session():
     try:
-        user_db = session['user_db']
-        customer_id = user_db['stripe_customer_id']
+        # Always get the freshest user_db from the session at the start of the function
+        user_db = session['user_db'] 
+        current_stripe_customer_id = user_db['stripe_customer_id']
         
-        # If a stripe_customer_id exists, try to retrieve it to verify it's still valid.
-        # If it's not found, treat it as if no customer ID exists for the user.
-        if customer_id:
-            try:
-                stripe.Customer.retrieve(customer_id)
-                print(f"Stripe customer {customer_id} found for user {user_db['id']}.")
-            except stripe.error.InvalidRequestError as e:
-                # This error means the customer ID is invalid or doesn't exist in Stripe
-                print(f"Warning: Stored Stripe customer ID '{customer_id}' for user {user_db['id']} is invalid or not found in Stripe. Error: {e}")
-                
-                # Clear the invalid customer ID from the database and session
-                update_user_subscription(user_db['id'], None, user_db['subscription_status'], user_db.get('subscription_id'), user_db.get('subscription_end_date'))
-                session['user_db']['stripe_customer_id'] = None
-                customer_id = None # Set to None to force creation of a new customer
-            except Exception as e:
-                # Catch any other unexpected errors during retrieval
-                print(f"Unexpected error retrieving Stripe customer {customer_id} for user {user_db['id']}: {e}")
-                # Decide if you want to force new customer creation or re-raise
-                # For now, we'll force new creation for robustness
-                update_user_subscription(user_db['id'], None, user_db['subscription_status'], user_db.get('subscription_id'), user_db.get('subscription_end_date'))
-                session['user_db']['stripe_customer_id'] = None
-                customer_id = None
+        print(f"DEBUG: create_checkout_session - Initial customer_id from session: '{current_stripe_customer_id}'")
+        print(f"DEBUG: Type of current_stripe_customer_id: {type(current_stripe_customer_id)}")
 
-        # Create or get Stripe customer (this block now handles cases where customer_id was None initially or after verification)
-        if not customer_id:
-            print(f"Creating new Stripe customer for user {user_db['id']} ({session['user']['email']}).")
+        customer_to_use_id = None # This will hold the final, valid Stripe customer ID
+
+        if current_stripe_customer_id:
+            try:
+                # Attempt to retrieve existing customer to verify it's valid
+                stripe.Customer.retrieve(current_stripe_customer_id)
+                customer_to_use_id = current_stripe_customer_id # It's valid, so use it
+                print(f"DEBUG: Stored Stripe customer '{current_stripe_customer_id}' found and is valid.")
+            except stripe.error.InvalidRequestError as e:
+                # Customer ID is invalid or not found in Stripe, so we'll create a new one
+                print(f"DEBUG: Warning: Stored Stripe customer ID '{current_stripe_customer_id}' for user {user_db['id']} is invalid or not found in Stripe. Error: {e}. Will create a new customer.")
+                
+                # Clear the invalid ID from the database and session immediately
+                update_user_subscription(user_db['id'], None, user_db['subscription_status'], user_db.get('subscription_id'), user_db.get('subscription_end_date'))
+                # The update_user_subscription function now refreshes session['user_db']
+                # So, user_db in this function will reflect the None after this call.
+                customer_to_use_id = None # Explicitly set for clarity in this scope
+            except Exception as e:
+                # Catch any other unexpected errors during retrieval, also create new customer
+                print(f"DEBUG: Unexpected error retrieving Stripe customer '{current_stripe_customer_id}' for user {user_db['id']}: {e}. Will create a new customer.")
+                update_user_subscription(user_db['id'], None, user_db['subscription_status'], user_db.get('subscription_id'), user_db.get('subscription_end_date'))
+                customer_to_use_id = None
+        else:
+            print(f"DEBUG: No Stripe customer ID found in session initially for user {user_db['id']}. Will create a new customer.")
+            customer_to_use_id = None # Explicitly ensure it's None if not present
+
+        # If customer_to_use_id is still None (either no customer_id initially, or it was invalid/failed retrieval)
+        if not customer_to_use_id:
+            print(f"DEBUG: Creating new Stripe customer for user {user_db['id']} ({session['user']['email']}).")
             customer = stripe.Customer.create(
                 email=session['user']['email'],
                 name=session['user']['name']
             )
-            customer_id = customer.id
+            customer_to_use_id = customer.id
+            print(f"DEBUG: New Stripe customer created: '{customer_to_use_id}'")
             
-            # Update user with newly created Stripe customer ID
-            update_user_subscription(user_db['id'], customer_id, user_db['subscription_status'])
-            session['user_db']['stripe_customer_id'] = customer_id
-        
+            # Update user's DB and session with the new customer ID
+            update_user_subscription(user_db['id'], customer_to_use_id, user_db['subscription_status'])
+            # The update_user_subscription function now refreshes session['user_db']
+            
+        print(f"DEBUG: Final Stripe customer ID for checkout session: '{customer_to_use_id}'")
         # Create checkout session
         checkout_session = stripe.checkout.Session.create(
-            customer=customer_id,
+            customer=customer_to_use_id, # Use the determined final_customer_id
             payment_method_types=['card'],
             line_items=[{
                 'price': SUBSCRIPTION_PRICE_ID,
@@ -627,97 +642,6 @@ def create_checkout_session():
         import traceback
         traceback.print_exc() # Print full traceback for debugging
         return jsonify({'error': str(e)}), 500
-
-@app.route('/subscription/success')
-def subscription_success():
-    return redirect('/?subscription=success')
-
-@app.route('/subscription/cancel')
-def subscription_cancel():
-    return redirect('/?subscription=cancelled')
-
-@app.route('/api/subscription/portal', methods=['POST'])
-@login_required
-def customer_portal():
-    try:
-        user_db = session['user_db']
-        
-        if not user_db['stripe_customer_id']:
-            return jsonify({'error': 'No Stripe customer found'}), 400
-        
-        portal_session = stripe.billing_portal.Session.create(
-            customer=user_db['stripe_customer_id'],
-            return_url=url_for('index', _external=True)
-        )
-        
-        return jsonify({'portal_url': portal_session.url})
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/subscription/status')
-@login_required
-def subscription_status():
-    user_db = session['user_db']
-    is_active = is_subscription_active(user_db['id'])
-    
-    return jsonify({
-        'subscription_active': is_active,
-        'subscription_status': user_db['subscription_status'],
-        'stripe_customer_id': user_db['stripe_customer_id'] is not None
-    })
-
-# Webhook for Stripe events
-@app.route('/stripe/webhook', methods=['POST'])
-def stripe_webhook():
-    payload = request.get_data(as_text=True)
-    sig_header = request.headers.get('Stripe-Signature')
-    
-    try:
-        # Verify webhook signature
-        if STRIPE_WEBHOOK_SECRET:
-            event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
-        else:
-            # For testing without webhook secret
-            event = json.loads(payload)
-            print("Warning: Processing webhook without signature verification (STRIPE_WEBHOOK_SECRET not set).")
-        
-        print(f"Webhook received: {event['type']} (Event ID: {event['id']})")
-        
-    except ValueError as e:
-        print(f"Invalid payload: {e}")
-        return 'Invalid payload', 400
-    except stripe.error.SignatureVerificationError as e:
-        print(f"Invalid signature: {e}")
-        return 'Invalid signature', 400
-    
-    try:
-        # Handle subscription events
-        if event['type'] == 'customer.subscription.created':
-            subscription = event['data']['object']
-            handle_subscription_created(subscription)
-        elif event['type'] == 'customer.subscription.updated':
-            subscription = event['data']['object']
-            handle_subscription_updated(subscription)
-        elif event['type'] == 'customer.subscription.deleted':
-            subscription = event['data']['object']
-            handle_subscription_deleted(subscription)
-        elif event['type'] == 'invoice.payment_succeeded':
-            invoice = event['data']['object']
-            handle_payment_succeeded(invoice)
-        elif event['type'] == 'invoice.payment_failed':
-            invoice = event['data']['object']
-            handle_payment_failed(invoice)
-        else:
-            print(f"Unhandled event type: {event['type']}")
-        
-        return 'Success', 200
-        
-    except Exception as e:
-        print(f"Webhook processing error for event {event.get('id', 'N/A')}: {e}")
-        import traceback
-        traceback.print_exc()
-        return 'Webhook processing failed', 500
 
 def handle_subscription_created(subscription):
     try:
@@ -742,11 +666,8 @@ def handle_subscription_created(subscription):
                 
                 print(f"handle_subscription_created: Found user {user_id}. Updating subscription to status='{status}', id='{subscription_id}', end_date='{end_date}'")
                 
-                execute_query(conn, '''
-                    UPDATE users 
-                    SET subscription_status = ?, subscription_id = ?, subscription_end_date = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE stripe_customer_id = ?
-                ''', (status, subscription_id, end_date, customer_id)) # Pass datetime object directly
+                # Call update_user_subscription, which now also refreshes the session
+                update_user_subscription(user_id, customer_id, status, subscription_id, end_date)
                 
                 print(f"handle_subscription_created: Successfully updated subscription for user {user_id}")
             else:
@@ -772,12 +693,13 @@ def handle_subscription_deleted(subscription):
         print(f"handle_subscription_deleted: Processing subscription deletion for customer {customer_id}")
         
         with get_db_connection() as conn:
-            execute_query(conn, '''
-                UPDATE users 
-                SET subscription_status = 'canceled', subscription_id = NULL, subscription_end_date = NULL, updated_at = CURRENT_TIMESTAMP
-                WHERE stripe_customer_id = ?
-            ''', (customer_id,))
-            print(f"handle_subscription_deleted: Canceled subscription for customer {customer_id}")
+            # Call update_user_subscription, which now also refreshes the session
+            user = execute_query(conn, 'SELECT id FROM users WHERE stripe_customer_id = ?', (customer_id,), fetch='one')
+            if user:
+                update_user_subscription(user['id'], customer_id, 'canceled', None, None)
+                print(f"handle_subscription_deleted: Canceled subscription for customer {customer_id}")
+            else:
+                print(f"handle_subscription_deleted: No user found for customer {customer_id} to cancel subscription.")
             
     except Exception as e:
         print(f"Error in handle_subscription_deleted: {e}")
@@ -804,12 +726,12 @@ def handle_payment_failed(invoice):
         print(f"handle_payment_failed: Payment failed for customer {customer_id}")
         
         with get_db_connection() as conn:
-            execute_query(conn, '''
-                UPDATE users 
-                SET subscription_status = 'past_due', updated_at = CURRENT_TIMESTAMP
-                WHERE stripe_customer_id = ?
-            ''', (customer_id,))
-            print(f"handle_payment_failed: Updated user status to 'past_due' for customer {customer_id}")
+            user = execute_query(conn, 'SELECT id FROM users WHERE stripe_customer_id = ?', (customer_id,), fetch='one')
+            if user:
+                update_user_subscription(user['id'], customer_id, 'past_due', user.get('subscription_id'), user.get('subscription_end_date'))
+                print(f"handle_payment_failed: Updated user status to 'past_due' for customer {customer_id}")
+            else:
+                print(f"handle_payment_failed: No user found for customer {customer_id} to update payment status.")
             
     except Exception as e:
         print(f"Error in handle_payment_failed: {e}")
