@@ -1063,6 +1063,487 @@ def health_check():
         "timestamp": datetime.now().isoformat()
     })
 
+# Add these database management routes to your app.py
+#################################################################################################################DEBUGSTARTSHERE###########################################
+@app.route('/debug/database/users')
+@login_required
+def debug_list_all_users():
+    """List all users in the database with their Stripe info."""
+    try:
+        with get_db_connection() as conn:
+            users = execute_query(conn, '''
+                SELECT id, google_id, email, name, stripe_customer_id, 
+                       subscription_status, subscription_id, subscription_end_date,
+                       created_at, updated_at
+                FROM users 
+                ORDER BY created_at DESC
+            ''', fetch='all')
+            
+            user_list = []
+            for user in users:
+                user_dict = dict(user)
+                user_dict['created_at'] = str(user_dict['created_at']) if user_dict['created_at'] else None
+                user_dict['updated_at'] = str(user_dict['updated_at']) if user_dict['updated_at'] else None
+                user_dict['subscription_end_date'] = str(user_dict['subscription_end_date']) if user_dict['subscription_end_date'] else None
+                
+                # Check if Stripe customer exists
+                stripe_status = "NOT_SET"
+                if user_dict['stripe_customer_id']:
+                    try:
+                        stripe_customer = stripe.Customer.retrieve(user_dict['stripe_customer_id'])
+                        if getattr(stripe_customer, 'deleted', False):
+                            stripe_status = "DELETED"
+                        else:
+                            stripe_status = "EXISTS"
+                    except stripe.error.InvalidRequestError:
+                        stripe_status = "INVALID"
+                    except Exception as e:
+                        stripe_status = f"ERROR: {str(e)}"
+                
+                user_dict['stripe_customer_status'] = stripe_status
+                user_list.append(user_dict)
+            
+            return jsonify({
+                "total_users": len(user_list),
+                "users": user_list
+            })
+            
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/debug/database/user/<int:user_id>')
+@login_required
+def debug_get_user_details(user_id):
+    """Get detailed information about a specific user."""
+    try:
+        with get_db_connection() as conn:
+            # Get user info
+            user = execute_query(conn, '''
+                SELECT * FROM users WHERE id = ?
+            ''', (user_id,), fetch='one')
+            
+            if not user:
+                return jsonify({"error": "User not found"}), 404
+            
+            user_dict = dict(user)
+            user_dict['created_at'] = str(user_dict['created_at']) if user_dict['created_at'] else None
+            user_dict['updated_at'] = str(user_dict['updated_at']) if user_dict['updated_at'] else None
+            user_dict['subscription_end_date'] = str(user_dict['subscription_end_date']) if user_dict['subscription_end_date'] else None
+            
+            # Get transcription history
+            transcriptions = execute_query(conn, '''
+                SELECT id, filename, word_count, confidence, created_at
+                FROM transcriptions 
+                WHERE user_id = ? 
+                ORDER BY created_at DESC
+                LIMIT 10
+            ''', (user_id,), fetch='all')
+            
+            transcription_list = []
+            for trans in transcriptions:
+                trans_dict = dict(trans)
+                trans_dict['created_at'] = str(trans_dict['created_at']) if trans_dict['created_at'] else None
+                transcription_list.append(trans_dict)
+            
+            # Check Stripe customer status
+            stripe_info = {"status": "NOT_SET"}
+            if user_dict['stripe_customer_id']:
+                try:
+                    stripe_customer = stripe.Customer.retrieve(user_dict['stripe_customer_id'])
+                    stripe_info = {
+                        "status": "EXISTS",
+                        "id": stripe_customer.id,
+                        "email": stripe_customer.email,
+                        "created": stripe_customer.created,
+                        "deleted": getattr(stripe_customer, 'deleted', False)
+                    }
+                    
+                    # Get subscriptions for this customer
+                    subscriptions = stripe.Subscription.list(customer=stripe_customer.id, limit=5)
+                    stripe_info["subscriptions"] = [
+                        {
+                            "id": sub.id,
+                            "status": sub.status,
+                            "current_period_start": sub.current_period_start,
+                            "current_period_end": sub.current_period_end,
+                            "created": sub.created
+                        } for sub in subscriptions.data
+                    ]
+                    
+                except stripe.error.InvalidRequestError:
+                    stripe_info = {"status": "INVALID", "error": "Customer not found in Stripe"}
+                except Exception as e:
+                    stripe_info = {"status": "ERROR", "error": str(e)}
+            
+            return jsonify({
+                "user": user_dict,
+                "transcriptions": {
+                    "count": len(transcription_list),
+                    "recent": transcription_list
+                },
+                "stripe_info": stripe_info,
+                "subscription_active": is_subscription_active(user_id)
+            })
+            
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/debug/database/cleanup-invalid-customers', methods=['POST'])
+@login_required
+def debug_cleanup_invalid_customers():
+    """Clean up users with invalid Stripe customer IDs."""
+    try:
+        with get_db_connection() as conn:
+            # Get all users with Stripe customer IDs
+            users = execute_query(conn, '''
+                SELECT id, email, stripe_customer_id FROM users 
+                WHERE stripe_customer_id IS NOT NULL AND stripe_customer_id != ''
+            ''', fetch='all')
+            
+            cleaned_users = []
+            errors = []
+            
+            for user in users:
+                user_dict = dict(user)
+                customer_id = user_dict['stripe_customer_id']
+                
+                try:
+                    # Check if customer exists in Stripe
+                    stripe_customer = stripe.Customer.retrieve(customer_id)
+                    if getattr(stripe_customer, 'deleted', False):
+                        # Customer is deleted, clean it up
+                        execute_query(conn, '''
+                            UPDATE users 
+                            SET stripe_customer_id = NULL, 
+                                subscription_status = 'inactive',
+                                subscription_id = NULL,
+                                subscription_end_date = NULL,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ?
+                        ''', (user_dict['id'],))
+                        
+                        cleaned_users.append({
+                            "user_id": user_dict['id'],
+                            "email": user_dict['email'],
+                            "customer_id": customer_id,
+                            "reason": "Customer deleted in Stripe"
+                        })
+                        
+                except stripe.error.InvalidRequestError:
+                    # Customer doesn't exist, clean it up
+                    execute_query(conn, '''
+                        UPDATE users 
+                        SET stripe_customer_id = NULL, 
+                            subscription_status = 'inactive',
+                            subscription_id = NULL,
+                            subscription_end_date = NULL,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    ''', (user_dict['id'],))
+                    
+                    cleaned_users.append({
+                        "user_id": user_dict['id'],
+                        "email": user_dict['email'],
+                        "customer_id": customer_id,
+                        "reason": "Customer not found in Stripe"
+                    })
+                    
+                except Exception as e:
+                    errors.append({
+                        "user_id": user_dict['id'],
+                        "email": user_dict['email'],
+                        "customer_id": customer_id,
+                        "error": str(e)
+                    })
+            
+            # Update current user's session if they were cleaned
+            if 'user_db' in session:
+                current_user_id = session['user_db']['id']
+                if any(u['user_id'] == current_user_id for u in cleaned_users):
+                    # Refresh session data
+                    updated_user = execute_query(conn, 'SELECT * FROM users WHERE id = ?', (current_user_id,), fetch='one')
+                    if updated_user:
+                        session['user_db'] = dict(updated_user)
+            
+            return jsonify({
+                "message": f"Cleanup completed. {len(cleaned_users)} users cleaned up.",
+                "cleaned_users": cleaned_users,
+                "errors": errors,
+                "total_processed": len(users)
+            })
+            
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/debug/database/reset-user-stripe/<int:user_id>', methods=['POST'])
+@login_required
+def debug_reset_user_stripe(user_id):
+    """Reset a specific user's Stripe information."""
+    try:
+        with get_db_connection() as conn:
+            # Get user info
+            user = execute_query(conn, '''
+                SELECT id, email, name, stripe_customer_id FROM users WHERE id = ?
+            ''', (user_id,), fetch='one')
+            
+            if not user:
+                return jsonify({"error": "User not found"}), 404
+            
+            user_dict = dict(user)
+            old_customer_id = user_dict['stripe_customer_id']
+            
+            # Clear Stripe data
+            execute_query(conn, '''
+                UPDATE users 
+                SET stripe_customer_id = NULL, 
+                    subscription_status = 'inactive',
+                    subscription_id = NULL,
+                    subscription_end_date = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (user_id,))
+            
+            # Update session if this is the current user
+            if 'user_db' in session and session['user_db']['id'] == user_id:
+                updated_user = execute_query(conn, 'SELECT * FROM users WHERE id = ?', (user_id,), fetch='one')
+                if updated_user:
+                    session['user_db'] = dict(updated_user)
+            
+            return jsonify({
+                "message": f"User {user_id} Stripe data reset successfully",
+                "user_id": user_id,
+                "email": user_dict['email'],
+                "old_customer_id": old_customer_id,
+                "new_status": "inactive"
+            })
+            
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/debug/database/stats')
+@login_required
+def debug_database_stats():
+    """Get database statistics."""
+    try:
+        with get_db_connection() as conn:
+            # User statistics
+            total_users = execute_query(conn, 'SELECT COUNT(*) as count FROM users', fetch='one')['count']
+            
+            users_with_stripe = execute_query(conn, '''
+                SELECT COUNT(*) as count FROM users 
+                WHERE stripe_customer_id IS NOT NULL AND stripe_customer_id != ''
+            ''', fetch='one')['count']
+            
+            active_subscriptions = execute_query(conn, '''
+                SELECT COUNT(*) as count FROM users 
+                WHERE subscription_status = 'active'
+            ''', fetch='one')['count']
+            
+            # Transcription statistics
+            total_transcriptions = execute_query(conn, 'SELECT COUNT(*) as count FROM transcriptions', fetch='one')['count']
+            
+            # Users by subscription status
+            status_counts = execute_query(conn, '''
+                SELECT subscription_status, COUNT(*) as count 
+                FROM users 
+                GROUP BY subscription_status
+            ''', fetch='all')
+            
+            status_breakdown = {}
+            for row in status_counts:
+                status_breakdown[row['subscription_status'] or 'null'] = row['count']
+            
+            # Recent activity
+            recent_users = execute_query(conn, '''
+                SELECT COUNT(*) as count FROM users 
+                WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '7 days'
+            ''', fetch='one') if DATABASE_URL.startswith('postgresql://') else execute_query(conn, '''
+                SELECT COUNT(*) as count FROM users 
+                WHERE created_at > datetime('now', '-7 days')
+            ''', fetch='one')
+            
+            return jsonify({
+                "users": {
+                    "total": total_users,
+                    "with_stripe_customer": users_with_stripe,
+                    "active_subscriptions": active_subscriptions,
+                    "recent_7_days": recent_users['count']
+                },
+                "transcriptions": {
+                    "total": total_transcriptions
+                },
+                "subscription_status_breakdown": status_breakdown,
+                "database_type": "PostgreSQL" if (DATABASE_URL.startswith('postgresql://') and POSTGRES_AVAILABLE) else "SQLite"
+            })
+            
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/debug/database/delete-user/<int:user_id>', methods=['DELETE'])
+@login_required
+def debug_delete_user(user_id):
+    """Delete a user and all their data (use with caution!)."""
+    try:
+        # Don't allow users to delete themselves
+        if 'user_db' in session and session['user_db']['id'] == user_id:
+            return jsonify({"error": "Cannot delete your own account via debug endpoint"}), 400
+        
+        with get_db_connection() as conn:
+            # Get user info first
+            user = execute_query(conn, 'SELECT * FROM users WHERE id = ?', (user_id,), fetch='one')
+            if not user:
+                return jsonify({"error": "User not found"}), 404
+            
+            user_dict = dict(user)
+            
+            # Delete transcriptions first (foreign key constraint)
+            transcription_count = execute_query(conn, 'SELECT COUNT(*) as count FROM transcriptions WHERE user_id = ?', (user_id,), fetch='one')['count']
+            execute_query(conn, 'DELETE FROM transcriptions WHERE user_id = ?', (user_id,))
+            
+            # Delete user
+            execute_query(conn, 'DELETE FROM users WHERE id = ?', (user_id,))
+            
+            return jsonify({
+                "message": f"User {user_id} deleted successfully",
+                "deleted_user": {
+                    "id": user_dict['id'],
+                    "email": user_dict['email'],
+                    "name": user_dict['name']
+                },
+                "deleted_transcriptions": transcription_count
+            })
+            
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# Add a simple HTML interface for easier database management
+@app.route('/debug/database/admin')
+@login_required
+def debug_database_admin():
+    """Simple HTML interface for database management."""
+    html = '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Database Admin</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; }
+            .section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+            .button { background: #007bff; color: white; padding: 10px 15px; border: none; border-radius: 3px; cursor: pointer; margin: 5px; }
+            .button:hover { background: #0056b3; }
+            .danger { background: #dc3545; }
+            .danger:hover { background: #c82333; }
+            .success { background: #28a745; }
+            .success:hover { background: #218838; }
+            .output { background: #f8f9fa; padding: 10px; border-radius: 3px; margin: 10px 0; white-space: pre-wrap; }
+        </style>
+    </head>
+    <body>
+        <h1>Database Administration</h1>
+        
+        <div class="section">
+            <h3>Database Overview</h3>
+            <button class="button" onclick="loadStats()">Load Statistics</button>
+            <button class="button" onclick="loadUsers()">List All Users</button>
+            <div id="stats-output" class="output" style="display:none;"></div>
+        </div>
+        
+        <div class="section">
+            <h3>Stripe Cleanup</h3>
+            <button class="button success" onclick="cleanupInvalidCustomers()">Cleanup Invalid Stripe Customers</button>
+            <div id="cleanup-output" class="output" style="display:none;"></div>
+        </div>
+        
+        <div class="section">
+            <h3>User Management</h3>
+            <input type="number" id="user-id" placeholder="User ID" />
+            <button class="button" onclick="getUserDetails()">Get User Details</button>
+            <button class="button" onclick="resetUserStripe()">Reset User Stripe</button>
+            <button class="button danger" onclick="deleteUser()">Delete User</button>
+            <div id="user-output" class="output" style="display:none;"></div>
+        </div>
+        
+        <script>
+            async function loadStats() {
+                try {
+                    const response = await fetch('/debug/database/stats');
+                    const data = await response.json();
+                    document.getElementById('stats-output').style.display = 'block';
+                    document.getElementById('stats-output').textContent = JSON.stringify(data, null, 2);
+                } catch (error) {
+                    alert('Error: ' + error.message);
+                }
+            }
+            
+            async function loadUsers() {
+                try {
+                    const response = await fetch('/debug/database/users');
+                    const data = await response.json();
+                    document.getElementById('stats-output').style.display = 'block';
+                    document.getElementById('stats-output').textContent = JSON.stringify(data, null, 2);
+                } catch (error) {
+                    alert('Error: ' + error.message);
+                }
+            }
+            
+            async function cleanupInvalidCustomers() {
+                if (!confirm('This will clean up all invalid Stripe customer references. Continue?')) return;
+                try {
+                    const response = await fetch('/debug/database/cleanup-invalid-customers', {method: 'POST'});
+                    const data = await response.json();
+                    document.getElementById('cleanup-output').style.display = 'block';
+                    document.getElementById('cleanup-output').textContent = JSON.stringify(data, null, 2);
+                } catch (error) {
+                    alert('Error: ' + error.message);
+                }
+            }
+            
+            async function getUserDetails() {
+                const userId = document.getElementById('user-id').value;
+                if (!userId) { alert('Please enter a user ID'); return; }
+                try {
+                    const response = await fetch(`/debug/database/user/${userId}`);
+                    const data = await response.json();
+                    document.getElementById('user-output').style.display = 'block';
+                    document.getElementById('user-output').textContent = JSON.stringify(data, null, 2);
+                } catch (error) {
+                    alert('Error: ' + error.message);
+                }
+            }
+            
+            async function resetUserStripe() {
+                const userId = document.getElementById('user-id').value;
+                if (!userId) { alert('Please enter a user ID'); return; }
+                if (!confirm(`Reset Stripe data for user ${userId}?`)) return;
+                try {
+                    const response = await fetch(`/debug/database/reset-user-stripe/${userId}`, {method: 'POST'});
+                    const data = await response.json();
+                    document.getElementById('user-output').style.display = 'block';
+                    document.getElementById('user-output').textContent = JSON.stringify(data, null, 2);
+                } catch (error) {
+                    alert('Error: ' + error.message);
+                }
+            }
+            
+            async function deleteUser() {
+                const userId = document.getElementById('user-id').value;
+                if (!userId) { alert('Please enter a user ID'); return; }
+                if (!confirm(`DELETE user ${userId}? This cannot be undone!`)) return;
+                if (!confirm(`Are you SURE you want to delete user ${userId}?`)) return;
+                try {
+                    const response = await fetch(`/debug/database/delete-user/${userId}`, {method: 'DELETE'});
+                    const data = await response.json();
+                    document.getElementById('user-output').style.display = 'block';
+                    document.getElementById('user-output').textContent = JSON.stringify(data, null, 2);
+                } catch (error) {
+                    alert('Error: ' + error.message);
+                }
+            }
+        </script>
+    </body>
+    </html>
+    '''
+    return html
 # Initialize database on startup
 init_db()
 
