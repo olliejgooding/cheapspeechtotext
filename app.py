@@ -474,316 +474,7 @@ def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if 'user' not in session:
-            return jsonify({
-            "user_id": user_dict['id'],
-            "email": user_dict['email'],
-            "stripe_customer_id": user_dict.get('stripe_customer_id'),
-            "subscription_status": user_dict.get('subscription_status'),
-            "subscription_id": user_dict.get('subscription_id'),
-            "subscription_end_date": str(user_dict.get('subscription_end_date')) if user_dict.get('subscription_end_date') else None,
-            "subscription_active_calculated": subscription_active,
-            "stripe_info": stripe_info
-        })
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# Authentication routes
-@app.route('/auth/login')
-def login():
-    if not client_config:
-        return jsonify({"error": "Google OAuth not configured"}), 500
-    
-    try:
-        google_scopes = [
-            'openid',
-            'https://www.googleapis.com/auth/userinfo.email',
-            'https://www.googleapis.com/auth/userinfo.profile'
-        ]
-        
-        flow = Flow.from_client_config(client_config, scopes=google_scopes)
-        flow.redirect_uri = url_for('auth_callback', _external=True)
-        
-        authorization_url, state = flow.authorization_url(
-            access_type='offline',
-            include_granted_scopes='true'
-        )
-        
-        session['state'] = state
-        session['oauth_scopes'] = google_scopes
-        
-        return jsonify({"auth_url": authorization_url})
-    
-    except Exception as e:
-        return jsonify({"error": f"Login failed: {str(e)}"}), 500
-
-@app.route('/auth/callback')
-def auth_callback():
-    if not client_config:
-        return jsonify({"error": "Google OAuth not configured"}), 500
-    
-    try:
-        if 'state' not in session or request.args.get('state') != session['state']:
-            return redirect('/?auth=error')
-        
-        flow = Flow.from_client_config(
-            client_config,
-            scopes=[
-                'openid',
-                'https://www.googleapis.com/auth/userinfo.email',
-                'https://www.googleapis.com/auth/userinfo.profile'
-            ],
-            state=session['state']
-        )
-        flow.redirect_uri = url_for('auth_callback', _external=True)
-        
-        flow.fetch_token(authorization_response=request.url)
-        
-        credentials = flow.credentials
-        request_session = google.auth.transport.requests.Request()
-        
-        id_info = id_token.verify_oauth2_token(
-            credentials.id_token,
-            request_session,
-            GOOGLE_CLIENT_ID
-        )
-        
-        # Store Google user info in session
-        session['user'] = {
-            'id': id_info['sub'],
-            'email': id_info['email'],
-            'name': id_info['name'],
-            'picture': id_info.get('picture', ''),
-            'verified_email': id_info.get('email_verified', False)
-        }
-        
-        # Get or create user in database
-        user_db = get_or_create_user(session['user'])
-        session['user_db'] = user_db
-        
-        session.pop('state', None)
-        session.pop('oauth_scopes', None)
-        
-        return redirect('/?auth=success')
-        
-    except Exception as e:
-        print(f"Authentication error: {e}")
-        session.pop('state', None)
-        session.pop('oauth_scopes', None)
-        return redirect('/?auth=error')
-
-@app.route('/auth/logout', methods=['POST'])
-def logout():
-    session.clear()
-    return jsonify({"message": "Logged out successfully"})
-
-@app.route('/auth/user')
-def get_user():
-    if 'user' in session and 'user_db' in session:
-        return jsonify({
-            "authenticated": True,
-            "user": session['user'],
-            "subscription_active": is_subscription_active(session['user_db']['id']),
-            "subscription_status": session['user_db']['subscription_status']
-        })
-    else:
-        return jsonify({"authenticated": False, "user": None})
-
-# Subscription routes
-@app.route('/api/subscription/create-checkout-session', methods=['POST'])
-@login_required
-def create_checkout_session():
-    try:
-        # Always get the freshest user_db from the session at the start of the function
-        # This ensures we start with the most current data, especially after a login.
-        user_db = session['user_db'] 
-        current_stripe_customer_id = user_db['stripe_customer_id']
-        
-        print(f"DEBUG: create_checkout_session - Initial customer_id from session: '{current_stripe_customer_id}'")
-        print(f"DEBUG: Type of current_stripe_customer_id: {type(current_stripe_customer_id)}")
-
-        customer_to_use_id = None # This will hold the final, valid Stripe customer ID
-
-        if current_stripe_customer_id:
-            try:
-                # Attempt to retrieve existing customer to verify it's valid
-                stripe.Customer.retrieve(current_stripe_customer_id)
-                customer_to_use_id = current_stripe_customer_id # It's valid, so use it
-                print(f"DEBUG: Stored Stripe customer '{current_stripe_customer_id}' found and is valid.")
-            except stripe.error.InvalidRequestError as e:
-                # Customer ID is invalid or not found in Stripe, so we'll create a new one
-                print(f"DEBUG: Warning: Stored Stripe customer ID '{current_stripe_customer_id}' for user {user_db['id']} is invalid or not found in Stripe. Error: {e}. Will create a new customer.")
-                
-                # Clear the invalid ID from the database and session immediately
-                update_user_subscription(user_db['id'], None, user_db['subscription_status'], user_db.get('subscription_id'), user_db.get('subscription_end_date'))
-                # After updating, explicitly re-read user_db from session to ensure local variable is fresh
-                user_db = session['user_db'] # <--- ADDED/CONFIRMED THIS LINE
-                customer_to_use_id = None # Explicitly set for clarity in this scope
-            except Exception as e:
-                # Catch any other unexpected errors during retrieval, also create new customer
-                print(f"DEBUG: Unexpected error retrieving Stripe customer '{current_stripe_customer_id}' for user {user_db['id']}: {e}. Will create a new customer.")
-                update_user_subscription(user_db['id'], None, user_db['subscription_status'], user_db.get('subscription_id'), user_db.get('subscription_end_date'))
-                # After updating, explicitly re-read user_db from session to ensure local variable is fresh
-                user_db = session['user_db'] # <--- ADDED/CONFIRMED THIS LINE
-                customer_to_use_id = None
-        else:
-            print(f"DEBUG: No Stripe customer ID found in session initially for user {user_db['id']}. Will create a new customer.")
-            customer_to_use_id = None # Explicitly ensure it's None if not present
-
-        # If customer_to_use_id is still None (either no customer_id initially, or it was invalid/failed retrieval)
-        if not customer_to_use_id:
-            print(f"DEBUG: Creating new Stripe customer for user {user_db['id']} ({session['user']['email']}).")
-            customer = stripe.Customer.create(
-                email=session['user']['email'],
-                name=session['user']['name']
-            )
-            customer_to_use_id = customer.id
-            print(f"DEBUG: New Stripe customer created: '{customer_to_use_id}'")
-            
-            # Update user's DB and session with the new customer ID
-            update_user_subscription(user_db['id'], customer_to_use_id, user_db['subscription_status'])
-            # After updating, explicitly re-read user_db from session to ensure local variable is fresh
-            user_db = session['user_db'] # <--- ADDED/CONFIRMED THIS LINE
-            
-        print(f"DEBUG: Final Stripe customer ID for checkout session: '{customer_to_use_id}'")
-        # Create checkout session
-        checkout_session = stripe.checkout.Session.create(
-            customer=customer_to_use_id, # Use the determined final_customer_id
-            payment_method_types=['card'],
-            line_items=[{
-                'price': SUBSCRIPTION_PRICE_ID,
-                'quantity': 1,
-            }],
-            mode='subscription',
-            success_url=url_for('subscription_success', _external=True), # Keep _external=True as Stripe requires absolute URLs
-            cancel_url=url_for('subscription_cancel', _external=True),   # Keep _external=True as Stripe requires absolute URLs
-            metadata={'user_id': str(user_db['id'])}
-        )
-        
-        return jsonify({'checkout_url': checkout_session.url})
-        
-    except Exception as e:
-        print(f"Checkout session creation failed: {e}")
-        import traceback
-        traceback.print_exc() # Print full traceback for debugging
-        return jsonify({'error': str(e)}), 500
-
-# Protected transcription routes
-@app.route('/upload', methods=['POST'])
-@subscription_required
-def upload_file():
-    if 'file' not in request.files:
-        return jsonify({"error": "No file provided"}), 400
-    
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({"error": "No file selected"}), 400
-    
-    if not allowed_file(file.filename):
-        return jsonify({"error": f"File type not supported. Allowed types: {', '.join(ALLOWED_EXTENSIONS)}"}), 400
-    
-    try:
-        filename = secure_filename(file.filename)
-        unique_filename = f"{uuid.uuid4().hex}_{filename}"
-        file_path = os.path.join(UPLOAD_FOLDER, unique_filename)
-        file.save(file_path)
-        
-        wav_path = file_path
-        if not filename.lower().endswith('.wav'):
-            wav_path = os.path.join(UPLOAD_FOLDER, f"{unique_filename}.wav")
-            if not convert_to_wav(file_path, wav_path):
-                os.remove(file_path)
-                return jsonify({"error": "Failed to convert audio file to WAV."}), 500
-        
-        result = transcribe_audio(wav_path)
-        
-        # Clean up files
-        try:
-            os.remove(file_path)
-            if wav_path != file_path:
-                os.remove(wav_path)
-        except Exception:
-            pass
-        
-        if "error" in result:
-            return jsonify(result), 500
-        
-        # Save transcription to database
-        user_db = session['user_db']
-        with get_db_connection() as conn:
-            execute_query(conn, '''
-                INSERT INTO transcriptions (user_id, filename, transcript, word_count, confidence)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (user_db['id'], filename, result['transcript'], result['word_count'], result['confidence']))
-        
-        return jsonify({
-            "success": True,
-            "transcript": result["transcript"],
-            "confidence": result["confidence"],
-            "word_count": result["word_count"],
-            "filename": filename,
-            "user": session['user']['name']
-        })
-    
-    except Exception as e:
-        print(f"Upload failed: {e}")
-        return jsonify({"error": f"Processing failed: {str(e)}"}), 500
-
-@app.route('/download', methods=['POST'])
-@subscription_required
-def download_transcript():
-    data = request.get_json()
-    if not data or 'transcript' not in data:
-        return jsonify({"error": "No transcript provided"}), 400
-    
-    try:
-        transcript = data['transcript']
-        filename = data.get('filename', 'transcript')
-        
-        if '.' in filename:
-            filename = filename.rsplit('.', 1)[0]
-        
-        docx_path = create_docx(transcript, filename)
-        
-        return send_file(
-            docx_path,
-            as_attachment=True,
-            download_name=f"{filename}_transcript.docx",
-            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        )
-    
-    except Exception as e:
-        return jsonify({"error": f"Document creation failed: {str(e)}"}), 500
-
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({
-        "status": "healthy",
-        "database_type": "PostgreSQL" if (DATABASE_URL.startswith('postgresql://') and POSTGRES_AVAILABLE) else "SQLite",
-        "azure_speech_initialized": speech_config is not None,
-        "google_oauth_configured": client_config is not None,
-        "stripe_configured": stripe.api_key is not None,
-        "authenticated_session_active": 'user' in session,
-        "timestamp": datetime.now().isoformat()
-    })
-
-# Initialize database on startup
-init_db()
-
-# Print the URL map to debug registered routes
-print("\n--- Flask URL Map ---")
-for rule in app.url_map.iter_rules():
-    print(f"Endpoint: {rule.endpoint}, Methods: {rule.methods}, Rule: {rule.rule}")
-print("---------------------\n")
-
-if __name__ == '__main__':
-    # This block is for local development only
-    print("Running Flask app in local development mode...")
-    app.run(debug=True, host='0.0.0.0', port=5000)
-else:
-    # This block is for production deployment (e.g., with Gunicorn)
-    # The 'app' object is expected to be imported by a WSGI server
-    print("Flask app loaded for production deployment.")"error": "Authentication required", "redirect": "/auth/login"}), 401
+            return jsonify({"error": "Authentication required", "redirect": "/auth/login"}), 401
         return f(*args, **kwargs)
     return decorated_function
 
@@ -1080,3 +771,312 @@ def debug_subscription_info():
                 stripe_info = {"error": str(e)}
         
         return jsonify({
+            "user_id": user_dict['id'],
+            "email": user_dict['email'],
+            "stripe_customer_id": user_dict.get('stripe_customer_id'),
+            "subscription_status": user_dict.get('subscription_status'),
+            "subscription_id": user_dict.get('subscription_id'),
+            "subscription_end_date": str(user_dict.get('subscription_end_date')) if user_dict.get('subscription_end_date') else None,
+            "subscription_active_calculated": subscription_active,
+            "stripe_info": stripe_info
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# Authentication routes
+@app.route('/auth/login')
+def login():
+    if not client_config:
+        return jsonify({"error": "Google OAuth not configured"}), 500
+    
+    try:
+        google_scopes = [
+            'openid',
+            'https://www.googleapis.com/auth/userinfo.email',
+            'https://www.googleapis.com/auth/userinfo.profile'
+        ]
+        
+        flow = Flow.from_client_config(client_config, scopes=google_scopes)
+        flow.redirect_uri = url_for('auth_callback', _external=True)
+        
+        authorization_url, state = flow.authorization_url(
+            access_type='offline',
+            include_granted_scopes='true'
+        )
+        
+        session['state'] = state
+        session['oauth_scopes'] = google_scopes
+        
+        return jsonify({"auth_url": authorization_url})
+    
+    except Exception as e:
+        return jsonify({"error": f"Login failed: {str(e)}"}), 500
+
+@app.route('/auth/callback')
+def auth_callback():
+    if not client_config:
+        return jsonify({"error": "Google OAuth not configured"}), 500
+    
+    try:
+        if 'state' not in session or request.args.get('state') != session['state']:
+            return redirect('/?auth=error')
+        
+        flow = Flow.from_client_config(
+            client_config,
+            scopes=[
+                'openid',
+                'https://www.googleapis.com/auth/userinfo.email',
+                'https://www.googleapis.com/auth/userinfo.profile'
+            ],
+            state=session['state']
+        )
+        flow.redirect_uri = url_for('auth_callback', _external=True)
+        
+        flow.fetch_token(authorization_response=request.url)
+        
+        credentials = flow.credentials
+        request_session = google.auth.transport.requests.Request()
+        
+        id_info = id_token.verify_oauth2_token(
+            credentials.id_token,
+            request_session,
+            GOOGLE_CLIENT_ID
+        )
+        
+        # Store Google user info in session
+        session['user'] = {
+            'id': id_info['sub'],
+            'email': id_info['email'],
+            'name': id_info['name'],
+            'picture': id_info.get('picture', ''),
+            'verified_email': id_info.get('email_verified', False)
+        }
+        
+        # Get or create user in database
+        user_db = get_or_create_user(session['user'])
+        session['user_db'] = user_db
+        
+        session.pop('state', None)
+        session.pop('oauth_scopes', None)
+        
+        return redirect('/?auth=success')
+        
+    except Exception as e:
+        print(f"Authentication error: {e}")
+        session.pop('state', None)
+        session.pop('oauth_scopes', None)
+        return redirect('/?auth=error')
+
+@app.route('/auth/logout', methods=['POST'])
+def logout():
+    session.clear()
+    return jsonify({"message": "Logged out successfully"})
+
+@app.route('/auth/user')
+def get_user():
+    if 'user' in session and 'user_db' in session:
+        return jsonify({
+            "authenticated": True,
+            "user": session['user'],
+            "subscription_active": is_subscription_active(session['user_db']['id']),
+            "subscription_status": session['user_db']['subscription_status']
+        })
+    else:
+        return jsonify({"authenticated": False, "user": None})
+
+# Subscription routes
+@app.route('/api/subscription/create-checkout-session', methods=['POST'])
+@login_required
+def create_checkout_session():
+    try:
+        # Always get the freshest user_db from the session at the start of the function
+        # This ensures we start with the most current data, especially after a login.
+        user_db = session['user_db'] 
+        current_stripe_customer_id = user_db['stripe_customer_id']
+        
+        print(f"DEBUG: create_checkout_session - Initial customer_id from session: '{current_stripe_customer_id}'")
+        print(f"DEBUG: Type of current_stripe_customer_id: {type(current_stripe_customer_id)}")
+
+        customer_to_use_id = None # This will hold the final, valid Stripe customer ID
+
+        if current_stripe_customer_id:
+            try:
+                # Attempt to retrieve existing customer to verify it's valid
+                stripe.Customer.retrieve(current_stripe_customer_id)
+                customer_to_use_id = current_stripe_customer_id # It's valid, so use it
+                print(f"DEBUG: Stored Stripe customer '{current_stripe_customer_id}' found and is valid.")
+            except stripe.error.InvalidRequestError as e:
+                # Customer ID is invalid or not found in Stripe, so we'll create a new one
+                print(f"DEBUG: Warning: Stored Stripe customer ID '{current_stripe_customer_id}' for user {user_db['id']} is invalid or not found in Stripe. Error: {e}. Will create a new customer.")
+                
+                # Clear the invalid ID from the database and session immediately
+                update_user_subscription(user_db['id'], None, user_db['subscription_status'], user_db.get('subscription_id'), user_db.get('subscription_end_date'))
+                # After updating, explicitly re-read user_db from session to ensure local variable is fresh
+                user_db = session['user_db']
+                customer_to_use_id = None # Explicitly set for clarity in this scope
+            except Exception as e:
+                # Catch any other unexpected errors during retrieval, also create new customer
+                print(f"DEBUG: Unexpected error retrieving Stripe customer '{current_stripe_customer_id}' for user {user_db['id']}: {e}. Will create a new customer.")
+                update_user_subscription(user_db['id'], None, user_db['subscription_status'], user_db.get('subscription_id'), user_db.get('subscription_end_date'))
+                # After updating, explicitly re-read user_db from session to ensure local variable is fresh
+                user_db = session['user_db']
+                customer_to_use_id = None
+        else:
+            print(f"DEBUG: No Stripe customer ID found in session initially for user {user_db['id']}. Will create a new customer.")
+            customer_to_use_id = None # Explicitly ensure it's None if not present
+
+        # If customer_to_use_id is still None (either no customer_id initially, or it was invalid/failed retrieval)
+        if not customer_to_use_id:
+            print(f"DEBUG: Creating new Stripe customer for user {user_db['id']} ({session['user']['email']}).")
+            customer = stripe.Customer.create(
+                email=session['user']['email'],
+                name=session['user']['name']
+            )
+            customer_to_use_id = customer.id
+            print(f"DEBUG: New Stripe customer created: '{customer_to_use_id}'")
+            
+            # Update user's DB and session with the new customer ID
+            update_user_subscription(user_db['id'], customer_to_use_id, user_db['subscription_status'])
+            # After updating, explicitly re-read user_db from session to ensure local variable is fresh
+            user_db = session['user_db']
+            
+        print(f"DEBUG: Final Stripe customer ID for checkout session: '{customer_to_use_id}'")
+        # Create checkout session
+        checkout_session = stripe.checkout.Session.create(
+            customer=customer_to_use_id, # Use the determined final_customer_id
+            payment_method_types=['card'],
+            line_items=[{
+                'price': SUBSCRIPTION_PRICE_ID,
+                'quantity': 1,
+            }],
+            mode='subscription',
+            success_url=url_for('subscription_success', _external=True), # Keep _external=True as Stripe requires absolute URLs
+            cancel_url=url_for('subscription_cancel', _external=True),   # Keep _external=True as Stripe requires absolute URLs
+            metadata={'user_id': str(user_db['id'])}
+        )
+        
+        return jsonify({'checkout_url': checkout_session.url})
+        
+    except Exception as e:
+        print(f"Checkout session creation failed: {e}")
+        import traceback
+        traceback.print_exc() # Print full traceback for debugging
+        return jsonify({'error': str(e)}), 500
+
+# Protected transcription routes
+@app.route('/upload', methods=['POST'])
+@subscription_required
+def upload_file():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No file selected"}), 400
+    
+    if not allowed_file(file.filename):
+        return jsonify({"error": f"File type not supported. Allowed types: {', '.join(ALLOWED_EXTENSIONS)}"}), 400
+    
+    try:
+        filename = secure_filename(file.filename)
+        unique_filename = f"{uuid.uuid4().hex}_{filename}"
+        file_path = os.path.join(UPLOAD_FOLDER, unique_filename)
+        file.save(file_path)
+        
+        wav_path = file_path
+        if not filename.lower().endswith('.wav'):
+            wav_path = os.path.join(UPLOAD_FOLDER, f"{unique_filename}.wav")
+            if not convert_to_wav(file_path, wav_path):
+                os.remove(file_path)
+                return jsonify({"error": "Failed to convert audio file to WAV."}), 500
+        
+        result = transcribe_audio(wav_path)
+        
+        # Clean up files
+        try:
+            os.remove(file_path)
+            if wav_path != file_path:
+                os.remove(wav_path)
+        except Exception:
+            pass
+        
+        if "error" in result:
+            return jsonify(result), 500
+        
+        # Save transcription to database
+        user_db = session['user_db']
+        with get_db_connection() as conn:
+            execute_query(conn, '''
+                INSERT INTO transcriptions (user_id, filename, transcript, word_count, confidence)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (user_db['id'], filename, result['transcript'], result['word_count'], result['confidence']))
+        
+        return jsonify({
+            "success": True,
+            "transcript": result["transcript"],
+            "confidence": result["confidence"],
+            "word_count": result["word_count"],
+            "filename": filename,
+            "user": session['user']['name']
+        })
+    
+    except Exception as e:
+        print(f"Upload failed: {e}")
+        return jsonify({"error": f"Processing failed: {str(e)}"}), 500
+
+@app.route('/download', methods=['POST'])
+@subscription_required
+def download_transcript():
+    data = request.get_json()
+    if not data or 'transcript' not in data:
+        return jsonify({"error": "No transcript provided"}), 400
+    
+    try:
+        transcript = data['transcript']
+        filename = data.get('filename', 'transcript')
+        
+        if '.' in filename:
+            filename = filename.rsplit('.', 1)[0]
+        
+        docx_path = create_docx(transcript, filename)
+        
+        return send_file(
+            docx_path,
+            as_attachment=True,
+            download_name=f"{filename}_transcript.docx",
+            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        )
+    
+    except Exception as e:
+        return jsonify({"error": f"Document creation failed: {str(e)}"}), 500
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({
+        "status": "healthy",
+        "database_type": "PostgreSQL" if (DATABASE_URL.startswith('postgresql://') and POSTGRES_AVAILABLE) else "SQLite",
+        "azure_speech_initialized": speech_config is not None,
+        "google_oauth_configured": client_config is not None,
+        "stripe_configured": stripe.api_key is not None,
+        "authenticated_session_active": 'user' in session,
+        "timestamp": datetime.now().isoformat()
+    })
+
+# Initialize database on startup
+init_db()
+
+# Print the URL map to debug registered routes
+print("\n--- Flask URL Map ---")
+for rule in app.url_map.iter_rules():
+    print(f"Endpoint: {rule.endpoint}, Methods: {rule.methods}, Rule: {rule.rule}")
+print("---------------------\n")
+
+if __name__ == '__main__':
+    # This block is for local development only
+    print("Running Flask app in local development mode...")
+    app.run(debug=True, host='0.0.0.0', port=5000)
+else:
+    # This block is for production deployment (e.g., with Gunicorn)
+    # The 'app' object is expected to be imported by a WSGI server
+    print("Flask app loaded for production deployment.")
